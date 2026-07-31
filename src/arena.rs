@@ -90,11 +90,11 @@ pub struct StringInterner {
 }
 
 #[derive(Clone, Debug, Copy)]
-pub struct InternedSymbol {
+pub struct InternedString {
     id: Id<Symbol>,
     pub span: Span,
 }
-impl PartialEq for InternedSymbol {
+impl PartialEq for InternedString {
     fn eq(&self, other: &Self) -> bool {
         self.id == other.id
     }
@@ -106,13 +106,13 @@ impl StringInterner {
             interner: Arena::new(),
         }
     }
-    pub fn intern(&mut self, item: Symbol, span: Span) -> InternedSymbol {
-        InternedSymbol {
+    pub fn intern(&mut self, item: Symbol, span: Span) -> InternedString {
+        InternedString {
             id: self.interner.intern(item),
             span,
         }
     }
-    pub fn get(&self, interned_symbol: InternedSymbol) -> &Symbol {
+    pub fn get(&self, interned_symbol: InternedString) -> &Symbol {
         self.interner.get(interned_symbol.id)
     }
 }

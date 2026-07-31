@@ -1,29 +1,42 @@
-use indexmap::set::Intersection;
-use tinyvec::TinyVec;
-
 use crate::{arena::*, span::Span};
 
 #[derive(Clone, Debug)]
-pub struct AstCtx {
-    type_arena: Arena<TypeKind>,
+pub struct AstArenas {
+    pub type_arena: Arena<TypeKind>,
+    pub expr_arena: Arena<Expr>,
+    pub stmt_arena: Arena<Stmt>,
+}
+
+impl AstArenas {
+    pub fn new() -> Self {
+        AstArenas {
+            type_arena: Arena::new(),
+            expr_arena: Arena::new(),
+            stmt_arena: Arena::new(),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum IntWidth {
+pub enum IntType {
     I8,
+    U8,
     I16,
+    U16,
     I32,
+    U32,
     I64,
+    U64,
 }
 #[derive(Debug, Clone)]
 pub enum TypeKind {
     Void,
-    Int(IntWidth),
+    Int(IntType),
     Ptr {
         pointee: Id<Type>,
     },
     Struct {
-        name: InternedSymbol,
+        name: InternedString,
     },
     Array {
         element_type: Id<Type>,
@@ -44,12 +57,28 @@ pub struct Type {
 #[derive(Debug, Clone)]
 pub struct Expr {
     pub kind: ExprKind,
-    pub span: Span,
     pub typ: Id<Type>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub enum ExprKind {}
+pub enum ExprKind {
+    Nullptr(Nullptr),
+    Cast(Cast),
+    Ident(Ident),
+    Int(Int),
+    BinaryOp(BinaryOp),
+    PrefixOp(PrefixOp),
+    PostfixOp(PostfixOp),
+    Ternary(Ternary),
+    FunctionCall(FunctionCall),
+    ArrayIndex(ArrayIndex),
+    SizeOfType(SizeOfType),
+    StructInit(StructInit),
+    ArrayInit(ArrayInit),
+    MemberAccess(MemberAccess),
+    PointerMemberAccess(PointerMemberAccess),
+}
 
 #[derive(Debug, Clone)]
 pub struct Nullptr;
@@ -62,30 +91,29 @@ pub struct Cast {
 
 #[derive(Debug, Clone)]
 pub struct Ident {
-    pub ident: InternedSymbol,
+    pub ident: InternedString,
 }
 
 #[derive(Clone, Debug, Copy)]
-pub enum NumberLiteralKind {
-    // I8(i8),
-    // U8(u8),
-    // I16(i16),
-    // U16(u16),
-    // I32(i32),
-    // U32(u32),
+pub enum IntLiteralKind {
+    I8(i8),
+    U8(u8),
+    I16(i16),
+    U16(u16),
+    I32(i32),
+    U32(u32),
     I64(i64),
-    // U64(u64),
-    // F64(f64),
+    U64(u64),
 }
 
 #[derive(Clone, Debug, Copy)]
-pub struct NumberLiteral {
+pub struct IntLiteral {
     pub span: Span,
 }
 
 #[derive(Debug, Clone)]
-pub struct Number {
-    pub lit: NumberLiteral,
+pub struct Int {
+    pub lit: IntLiteral,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOpKind {
@@ -117,8 +145,9 @@ pub enum BinaryOpKind {
 }
 #[derive(Debug, Clone)]
 pub struct BinaryOp {
-    left: Id<Expr>,
-    right: Id<Expr>,
+    pub kind: BinaryOpKind,
+    pub left: Id<Expr>,
+    pub right: Id<Expr>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -134,8 +163,8 @@ pub enum PrefixOpKind {
 
 #[derive(Debug, Clone)]
 pub struct PrefixOp {
-    kind: PrefixOpKind,
-    expr: Id<Expr>,
+    pub kind: PrefixOpKind,
+    pub expr: Id<Expr>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostfixOpKind {
@@ -145,55 +174,55 @@ pub enum PostfixOpKind {
 
 #[derive(Debug, Clone)]
 pub struct PostfixOp {
-    kind: PrefixOpKind,
-    expr: Id<Expr>,
+    pub kind: PrefixOpKind,
+    pub expr: Id<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct Ternary {
-    condition: Id<Expr>,
-    true_branch: Id<Expr>,
-    false_branch: Id<Expr>,
+    pub condition: Id<Expr>,
+    pub true_branch: Id<Expr>,
+    pub false_branch: Id<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FunctionCall {
-    func_expr: Id<Expr>,
-    args: Vec<Id<Expr>>,
+    pub func_expr: Id<Expr>,
+    pub args: Vec<Id<Expr>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ArrayIndex {
-    array: Id<Expr>,
-    index: Id<Expr>,
+    pub array: Id<Expr>,
+    pub index: Id<Expr>,
 }
 
 #[derive(Debug, Clone)]
 pub struct SizeOfType {
-    typ: Id<Type>,
+    pub typ: Id<Type>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StructInit {
-    name: InternedSymbol,
-    field_inits: Vec<(InternedSymbol, Id<Expr>)>,
+    pub name: InternedString,
+    pub field_inits: Vec<(InternedString, Id<Expr>)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ArrayInit {
-    elements: Vec<Id<Expr>>,
+    pub elements: Vec<Id<Expr>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct MemberAccess {
-    struct_expr: Id<Expr>,
-    member_name: InternedSymbol,
+    pub struct_expr: Id<Expr>,
+    pub member_name: InternedString,
 }
 
 #[derive(Debug, Clone)]
 pub struct PointerMemberAccess {
-    struct_ptr_expr: Id<Expr>,
-    member_name: InternedSymbol,
+    pub struct_ptr_expr: Id<Expr>,
+    pub member_name: InternedString,
 }
 
 #[derive(Debug, Clone)]
@@ -203,11 +232,21 @@ pub struct Stmt {
 }
 
 #[derive(Debug, Clone)]
-pub enum StmtKind {}
+pub enum StmtKind {
+    Assert(Assert),
+    Break(Break),
+    Continue(Continue),
+    Block(Block),
+    IfStmt(IfStmt),
+    WhileLoop(WhileLoop),
+    ForLoop(ForLoop),
+    ReturnStmt(ReturnStmt),
+    VariableDeclaration(VariableDeclaration),
+}
 
 #[derive(Debug, Clone)]
 pub struct Assert {
-    condition: Id<Expr>,
+    pub condition: Id<Expr>,
 }
 
 #[derive(Debug, Clone)]
@@ -218,52 +257,72 @@ pub struct Continue;
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    body: Vec<Id<Stmt>>,
+    pub body: Vec<Id<Stmt>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct IfStmt {
-    condition: Id<Expr>,
-    then_branch: Id<Stmt>,
-    else_branch: Option<Id<Stmt>>,
+    pub condition: Id<Expr>,
+    pub then_branch: Id<Stmt>,
+    pub else_branch: Option<Id<Stmt>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct WhileLoop {
-    condition: Id<Expr>,
-    body: Id<Stmt>,
+    pub condition: Id<Expr>,
+    pub body: Id<Stmt>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ForLoop {
-    init: Option<Id<Stmt>>,
-    condition: Option<Id<Expr>>,
-    post: Option<Id<Stmt>>,
-    body: Id<Stmt>,
+    pub init: Option<Id<Stmt>>,
+    pub condition: Option<Id<Expr>>,
+    pub post: Option<Id<Stmt>>,
+    pub body: Id<Stmt>,
 }
 
 #[derive(Debug, Clone)]
 pub struct ReturnStmt {
-    value: Option<Id<Expr>>,
+    pub value: Option<Id<Expr>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct VariableDeclaration {
-    var_type: Id<Type>,
-    name: InternedSymbol,
-    init_value: Option<Id<Expr>>,
+    pub var_type: Id<Type>,
+    pub name: InternedString,
+    pub init_value: Option<Id<Expr>>,
 }
 
 #[derive(Debug, Clone)]
 pub struct StructDeclaration {
-    name: InternedSymbol,
-    fields: Vec<(InternedSymbol, Id<Type>)>,
+    pub name: InternedString,
+    pub fields: Vec<(InternedString, Id<Type>)>,
 }
 
 #[derive(Debug, Clone)]
 pub struct FunctionDeclaration {
-    return_type: Option<Id<Type>>,
-    name: InternedSymbol,
-    params: Vec<(InternedSymbol, Id<Type>)>,
-    body: (Block, Span),
+    pub return_type: Option<Id<Type>>,
+    pub name: InternedString,
+    pub params: Vec<(InternedString, Id<Type>)>,
+    pub body: (Block, Span),
+}
+
+#[derive(Debug, Clone)]
+pub struct GlobalDeclaration {
+    pub kind: GlobalDeclarationKind,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub enum GlobalDeclarationKind {
+    Variable(VariableDeclaration),
+    Struct(StructDeclaration),
+    Function(FunctionDeclaration),
+}
+
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub decls: Vec<GlobalDeclaration>,
+    pub arenas: AstArenas,
+    pub span: Span,
 }
