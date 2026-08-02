@@ -1,23 +1,7 @@
-use crate::{arena::*, span::Span};
+use crate::span::Span;
+use bumpalo::collections::Vec;
 
-#[derive(Clone, Debug)]
-pub struct AstArenas {
-    pub type_arena: Arena<TypeKind>,
-    pub expr_arena: Arena<Expr>,
-    pub stmt_arena: Arena<Stmt>,
-}
-
-impl AstArenas {
-    pub fn new() -> Self {
-        AstArenas {
-            type_arena: Arena::new(),
-            expr_arena: Arena::new(),
-            stmt_arena: Arena::new(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum IntType {
     I8,
     U8,
@@ -28,73 +12,87 @@ pub enum IntType {
     I64,
     U64,
 }
-#[derive(Debug, Clone)]
-pub enum TypeKind {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TypeKind<'a> {
     Void,
     Int(IntType),
     Ptr {
-        pointee: Id<Type>,
+        pointee: Type<'a>,
     },
     Struct {
-        name: InternedString,
+        name: Ident<'a>,
     },
     Array {
-        element_type: Id<Type>,
+        element_type: Type<'a>,
         size: u64,
     },
     FuncPtr {
-        return_type: Option<Id<Type>>,
-        param_types: Vec<Id<Type>>,
+        return_type: Option<Type<'a>>,
+        param_types: Vec<'a, Type<'a>>,
     },
+    Error,
 }
 
-#[derive(Debug, Clone)]
-pub struct Type {
-    pub inner: TypeKind,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Type<'a> {
+    pub inner: &'a TypeKind<'a>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub struct Expr {
-    pub kind: ExprKind,
-    pub typ: Id<Type>,
+impl<'a> Type<'a> {
+    pub fn new(inner: &'a TypeKind<'a>, span: Span) -> Self {
+        Self { inner, span }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Expr<'a> {
+    pub kind: &'a ExprKind<'a>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub enum ExprKind {
+impl<'a> Expr<'a> {
+    pub fn new(kind: &'a ExprKind<'a>, span: Span) -> Self {
+        Self { kind, span }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExprKind<'a> {
     Nullptr(Nullptr),
-    Cast(Cast),
-    Ident(Ident),
+    Cast(Cast<'a>),
+    Ident(Ident<'a>),
     Int(Int),
-    BinaryOp(BinaryOp),
-    PrefixOp(PrefixOp),
-    PostfixOp(PostfixOp),
-    Ternary(Ternary),
-    FunctionCall(FunctionCall),
-    ArrayIndex(ArrayIndex),
-    SizeOfType(SizeOfType),
-    StructInit(StructInit),
-    ArrayInit(ArrayInit),
-    MemberAccess(MemberAccess),
-    PointerMemberAccess(PointerMemberAccess),
+    BinaryOp(BinaryOp<'a>),
+    PrefixOp(PrefixOp<'a>),
+    PostfixOp(PostfixOp<'a>),
+    Ternary(Ternary<'a>),
+    FunctionCall(FunctionCall<'a>),
+    ArrayIndex(ArrayIndex<'a>),
+    SizeOfType(SizeOfType<'a>),
+    StructInit(StructInit<'a>),
+    ArrayInit(ArrayInit<'a>),
+    MemberAccess(MemberAccess<'a>),
+    PointerMemberAccess(PointerMemberAccess<'a>),
+    Error,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Nullptr;
 
-#[derive(Debug, Clone)]
-pub struct Cast {
-    pub to_type: Id<Type>,
-    pub expr: Id<Expr>,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Cast<'a> {
+    pub to_type: Type<'a>,
+    pub expr: Expr<'a>,
 }
 
-#[derive(Debug, Clone)]
-pub struct Ident {
-    pub ident: InternedString,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ident<'a> {
+    pub ident: &'a str,
+    pub span: Span,
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub enum IntLiteralKind {
     I8(i8),
     U8(u8),
@@ -104,16 +102,19 @@ pub enum IntLiteralKind {
     U32(u32),
     I64(i64),
     U64(u64),
+    Error,
 }
 
-#[derive(Clone, Debug, Copy)]
+#[derive(Clone, Debug, Copy, PartialEq, Eq)]
 pub struct IntLiteral {
+    pub kind: IntLiteralKind,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Int {
     pub lit: IntLiteral,
+    pub span: Span,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum BinaryOpKind {
@@ -133,196 +134,220 @@ pub enum BinaryOpKind {
     BitOr,
     Xor,
     Mod,
-    AddEq,
-    SubEq,
-    MulEq,
-    DivEq,
-    BitAndEqual,
-    BitOrEqual,
-    XorEqual,
-    ModEqual,
+    AddAssign,
+    SubAssign,
+    MulAssign,
+    DivAssign,
+    BitAndAssign,
+    BitOrAssign,
+    XorAssign,
+    ModAssign,
     Assign,
 }
-#[derive(Debug, Clone)]
-pub struct BinaryOp {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BinaryOp<'a> {
     pub kind: BinaryOpKind,
-    pub left: Id<Expr>,
-    pub right: Id<Expr>,
+    pub left: Expr<'a>,
+    pub right: Expr<'a>,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PrefixOpKind {
-    PrefixIncrement,
-    PrefixDecrement,
+    Increment,
+    Decrement,
     UnaryPlus,
     UnaryMinus,
     AddressOf,
     Dereference,
     Not,
+    BitNot,
 }
 
-#[derive(Debug, Clone)]
-pub struct PrefixOp {
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PrefixOp<'a> {
     pub kind: PrefixOpKind,
-    pub expr: Id<Expr>,
+    pub expr: Expr<'a>,
+    pub span: Span,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum PostfixOpKind {
-    PostfixIncrement,
-    PostfixDecrement,
+    Increment,
+    Decrement,
 }
 
-#[derive(Debug, Clone)]
-pub struct PostfixOp {
-    pub kind: PrefixOpKind,
-    pub expr: Id<Expr>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Ternary {
-    pub condition: Id<Expr>,
-    pub true_branch: Id<Expr>,
-    pub false_branch: Id<Expr>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FunctionCall {
-    pub func_expr: Id<Expr>,
-    pub args: Vec<Id<Expr>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ArrayIndex {
-    pub array: Id<Expr>,
-    pub index: Id<Expr>,
-}
-
-#[derive(Debug, Clone)]
-pub struct SizeOfType {
-    pub typ: Id<Type>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StructInit {
-    pub name: InternedString,
-    pub field_inits: Vec<(InternedString, Id<Expr>)>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ArrayInit {
-    pub elements: Vec<Id<Expr>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct MemberAccess {
-    pub struct_expr: Id<Expr>,
-    pub member_name: InternedString,
-}
-
-#[derive(Debug, Clone)]
-pub struct PointerMemberAccess {
-    pub struct_ptr_expr: Id<Expr>,
-    pub member_name: InternedString,
-}
-
-#[derive(Debug, Clone)]
-pub struct Stmt {
-    pub kind: StmtKind,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PostfixOp<'a> {
+    pub kind: PostfixOpKind,
+    pub expr: Expr<'a>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub enum StmtKind {
-    Assert(Assert),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Ternary<'a> {
+    pub condition: Expr<'a>,
+    pub true_branch: Expr<'a>,
+    pub false_branch: Expr<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionCall<'a> {
+    pub func_expr: Expr<'a>,
+    pub args: Vec<'a, Expr<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayIndex<'a> {
+    pub array: Expr<'a>,
+    pub index: Expr<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SizeOfType<'a> {
+    pub typ: Type<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructInit<'a> {
+    pub name: Ident<'a>,
+    pub field_inits: Vec<'a, (Ident<'a>, Expr<'a>)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ArrayInit<'a> {
+    pub elements: Vec<'a, Expr<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemberAccess<'a> {
+    pub struct_expr: Expr<'a>,
+    pub member_name: Ident<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PointerMemberAccess<'a> {
+    pub struct_ptr_expr: Expr<'a>,
+    pub member_name: Ident<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Stmt<'a> {
+    pub kind: &'a StmtKind<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StmtKind<'a> {
+    Assert(Assert<'a>),
     Break(Break),
     Continue(Continue),
-    Block(Block),
-    IfStmt(IfStmt),
-    WhileLoop(WhileLoop),
-    ForLoop(ForLoop),
-    ReturnStmt(ReturnStmt),
-    VariableDeclaration(VariableDeclaration),
+    Block(Block<'a>),
+    IfStmt(IfStmt<'a>),
+    WhileLoop(WhileLoop<'a>),
+    ForLoop(ForLoop<'a>),
+    ReturnStmt(ReturnStmt<'a>),
+    VariableDeclaration(VariableDeclaration<'a>),
+    Expr(Expr<'a>),
 }
 
-#[derive(Debug, Clone)]
-pub struct Assert {
-    pub condition: Id<Expr>,
-}
-
-#[derive(Debug, Clone)]
-pub struct Break;
-
-#[derive(Debug, Clone)]
-pub struct Continue;
-
-#[derive(Debug, Clone)]
-pub struct Block {
-    pub body: Vec<Id<Stmt>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct IfStmt {
-    pub condition: Id<Expr>,
-    pub then_branch: Id<Stmt>,
-    pub else_branch: Option<Id<Stmt>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct WhileLoop {
-    pub condition: Id<Expr>,
-    pub body: Id<Stmt>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ForLoop {
-    pub init: Option<Id<Stmt>>,
-    pub condition: Option<Id<Expr>>,
-    pub post: Option<Id<Stmt>>,
-    pub body: Id<Stmt>,
-}
-
-#[derive(Debug, Clone)]
-pub struct ReturnStmt {
-    pub value: Option<Id<Expr>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct VariableDeclaration {
-    pub var_type: Id<Type>,
-    pub name: InternedString,
-    pub init_value: Option<Id<Expr>>,
-}
-
-#[derive(Debug, Clone)]
-pub struct StructDeclaration {
-    pub name: InternedString,
-    pub fields: Vec<(InternedString, Id<Type>)>,
-}
-
-#[derive(Debug, Clone)]
-pub struct FunctionDeclaration {
-    pub return_type: Option<Id<Type>>,
-    pub name: InternedString,
-    pub params: Vec<(InternedString, Id<Type>)>,
-    pub body: (Block, Span),
-}
-
-#[derive(Debug, Clone)]
-pub struct GlobalDeclaration {
-    pub kind: GlobalDeclarationKind,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Assert<'a> {
+    pub condition: Expr<'a>,
     pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub enum GlobalDeclarationKind {
-    Variable(VariableDeclaration),
-    Struct(StructDeclaration),
-    Function(FunctionDeclaration),
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Break {
+    pub span: Span,
 }
 
-#[derive(Debug, Clone)]
-pub struct Program {
-    pub decls: Vec<GlobalDeclaration>,
-    pub arenas: AstArenas,
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Continue {
     pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Block<'a> {
+    pub body: Vec<'a, Stmt<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct IfStmt<'a> {
+    pub condition: Expr<'a>,
+    pub then_branch: Stmt<'a>,
+    pub else_branch: Option<Stmt<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct WhileLoop<'a> {
+    pub condition: Expr<'a>,
+    pub body: Stmt<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForLoop<'a> {
+    pub init: Option<Stmt<'a>>,
+    pub condition: Option<Expr<'a>>,
+    pub post: Option<Expr<'a>>,
+    pub body: Stmt<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ReturnStmt<'a> {
+    pub value: Option<Expr<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VariableDeclaration<'a> {
+    pub var_type: Type<'a>,
+    pub name: Ident<'a>,
+    pub init_value: Option<Expr<'a>>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StructDeclaration<'a> {
+    pub name: Ident<'a>,
+    pub fields: Vec<'a, (Ident<'a>, Type<'a>)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FunctionDeclaration<'a> {
+    pub return_type: Option<Type<'a>>,
+    pub name: Ident<'a>,
+    pub params: Vec<'a, (Ident<'a>, Type<'a>)>,
+    pub body: Block<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct GlobalDeclaration<'a> {
+    pub kind: GlobalDeclarationKind<'a>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum GlobalDeclarationKind<'a> {
+    Variable(VariableDeclaration<'a>),
+    Struct(StructDeclaration<'a>),
+    Function(FunctionDeclaration<'a>),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Program<'a> {
+    pub decls: Vec<'a, GlobalDeclaration<'a>>,
 }

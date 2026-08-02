@@ -1,18 +1,12 @@
-use std::{
-    iter::Peekable,
-    num::{IntErrorKind, ParseIntError},
-    str::CharIndices,
-};
+use std::{iter::Peekable, num::IntErrorKind, str::CharIndices};
 
 use smol_str::SmolStr;
 
-use crate::{
-    arena::{InternedString, StringInterner, Symbol},
-    span::Span,
-};
+use crate::span::Span;
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum KeywordKind {
+    As,
     Nullptr,
     Int,
     Return,
@@ -26,11 +20,14 @@ pub enum KeywordKind {
     Break,
     Continue,
     Void,
+    Let,
+    #[cfg(test)]
+    Assert,
 }
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
     Keyword(KeywordKind),
-    Ident(InternedString),
+    Ident(SmolStr),
     IntLiteral { value: u64 },
     Plus,
     Minus,
@@ -73,12 +70,13 @@ pub enum TokenKind {
     PercentEqual,
     Arrow,
     Error,
+    Tilde,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct Token {
-    kind: TokenKind,
-    span: Span,
+    pub kind: TokenKind,
+    pub span: Span,
 }
 
 impl Token {
@@ -103,7 +101,6 @@ pub struct Lexer<'a> {
     errors: Vec<LexingError>,
     input: &'a str,
     iter: Peekable<CharIndices<'a>>,
-    interner: &'a mut StringInterner,
 }
 
 #[derive(Clone, Debug)]
@@ -113,7 +110,7 @@ pub struct LexingOutput {
 }
 
 impl LexingOutput {
-    fn has_errors(&self) -> bool {
+    pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 }
@@ -135,7 +132,7 @@ impl CharType {
             '0'..='9' => CharType::Num,
             ws if ws.is_whitespace() => CharType::Whitespace,
             '+' | '-' | '*' | '/' | ';' | ',' | '=' | '>' | '<' | '!' | '&' | '|' | '^' | '?'
-            | ':' | '.' | '%' => CharType::Punctutation,
+            | ':' | '.' | '%' | '~' => CharType::Punctutation,
             '(' | ')' | '{' | '}' | '[' | ']' => CharType::Bracket,
             _ => CharType::Unknown,
         }
@@ -143,14 +140,13 @@ impl CharType {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str, interner: &'a mut StringInterner) -> Self {
+    pub fn new(input: &'a str) -> Self {
         assert!(input.len() <= 4_000_000_000);
         Self {
             tokens: Vec::new(),
             errors: Vec::new(),
             input,
             iter: input.char_indices().peekable(),
-            interner,
         }
     }
     fn curr_index(&mut self) -> u32 {
@@ -167,9 +163,10 @@ impl<'a> Lexer<'a> {
         }
         let end = self.curr_index();
         let s = &self.input[start as usize..end as usize];
-        let span = Span::new(start, end as u32);
+        let span = Span::new(start, end);
         let kind = match s {
             "nullptr" => TokenKind::Keyword(KeywordKind::Nullptr),
+            "as" => TokenKind::Keyword(KeywordKind::As),
             "int" => TokenKind::Keyword(KeywordKind::Int),
             "return" => TokenKind::Keyword(KeywordKind::Return),
             "if" => TokenKind::Keyword(KeywordKind::If),
@@ -182,10 +179,8 @@ impl<'a> Lexer<'a> {
             "break" => TokenKind::Keyword(KeywordKind::Break),
             "continue" => TokenKind::Keyword(KeywordKind::Continue),
             "void" => TokenKind::Keyword(KeywordKind::Void),
-            _ => {
-                let interned = self.interner.intern(Symbol::new(s), span);
-                TokenKind::Ident(interned)
-            }
+            "let" => TokenKind::Keyword(KeywordKind::Let),
+            _ => TokenKind::Ident(SmolStr::new(s)),
         };
         self.tokens.push(Token { kind, span });
     }
@@ -273,7 +268,7 @@ impl<'a> Lexer<'a> {
                 _ => TokenKind::Asterisk,
             },
             '/' => match self.iter.peek() {
-                Some((_, '/')) => {
+                Some((_, '=')) => {
                     self.iter.next();
                     TokenKind::SlashEqual
                 }
@@ -348,6 +343,7 @@ impl<'a> Lexer<'a> {
             },
             ';' => TokenKind::Semicolon,
             ',' => TokenKind::Comma,
+            '~' => TokenKind::Tilde,
             _ => unreachable!(),
         };
         let span = Span::new(start, self.curr_index());
@@ -408,13 +404,118 @@ impl<'a> Lexer<'a> {
                 }
             }
         }
-        // while !self.is_eof() {
-        //     let curr = self.current();
-        //     if curr == "/" && self.can_doubleparse() && self.get(2) == "//" {
-        //         // comment
-        //         self.advancen(2);
-        //     }
-        // }
-        todo!()
+        LexingOutput {
+            tokens: self.tokens,
+            errors: self.errors,
+        }
     }
+}
+
+#[test]
+fn test_lexer() {
+    #[track_caller]
+    fn test(s: &str, expect: TokenKind) {
+        let lexer = Lexer::new(s);
+        let output = lexer.lex();
+        assert!(!output.has_errors());
+        assert_eq!(output.tokens.len(), 1);
+        assert_eq!(output.tokens[0].kind, expect);
+    }
+    test("nullptr", TokenKind::Keyword(KeywordKind::Nullptr));
+    test("as", TokenKind::Keyword(KeywordKind::As));
+    test("int", TokenKind::Keyword(KeywordKind::Int));
+    test("return", TokenKind::Keyword(KeywordKind::Return));
+    test("if", TokenKind::Keyword(KeywordKind::If));
+    test("else", TokenKind::Keyword(KeywordKind::Else));
+    test("while", TokenKind::Keyword(KeywordKind::While));
+    test("for", TokenKind::Keyword(KeywordKind::For));
+    test("sizeof", TokenKind::Keyword(KeywordKind::Sizeof));
+    test("struct", TokenKind::Keyword(KeywordKind::Struct));
+    test("fn", TokenKind::Keyword(KeywordKind::Fn));
+    test("break", TokenKind::Keyword(KeywordKind::Break));
+    test("continue", TokenKind::Keyword(KeywordKind::Continue));
+    test("void", TokenKind::Keyword(KeywordKind::Void));
+    test("let", TokenKind::Keyword(KeywordKind::Let));
+
+    test("hello", TokenKind::Ident(SmolStr::new("hello")));
+    test("hi", TokenKind::Ident(SmolStr::new("hi")));
+    test(
+        "interesting_thing",
+        TokenKind::Ident(SmolStr::new("interesting_thing")),
+    );
+    test("_", TokenKind::Ident(SmolStr::new("_")));
+    test(
+        "_______1521521512512",
+        TokenKind::Ident(SmolStr::new("_______1521521512512")),
+    );
+
+    test("0", TokenKind::IntLiteral { value: 0 });
+    test("1", TokenKind::IntLiteral { value: 1 });
+    test("1000000000", TokenKind::IntLiteral { value: 1000000000 });
+    test(
+        "000000000000000000000000000000000000000000000000000000000000000000",
+        TokenKind::IntLiteral { value: 0 },
+    );
+    test(
+        &u64::MAX.to_string(),
+        TokenKind::IntLiteral { value: u64::MAX },
+    );
+    test("0x0", TokenKind::IntLiteral { value: 0 });
+    test("0x1", TokenKind::IntLiteral { value: 1 });
+    test(
+        "0xFFFFFFFFFFFFFFFF",
+        TokenKind::IntLiteral {
+            value: 0xFFFFFFFFFFFFFFFF,
+        },
+    );
+    test("0b0", TokenKind::IntLiteral { value: 0 });
+    test("0b1", TokenKind::IntLiteral { value: 1 });
+    test("0b10", TokenKind::IntLiteral { value: 2 });
+    test(
+        "0b0000000011111111000000001111111100000000111111110000000011111111",
+        TokenKind::IntLiteral {
+            value: 0b0000000011111111000000001111111100000000111111110000000011111111,
+        },
+    );
+
+    test("+", TokenKind::Plus);
+    test("-", TokenKind::Minus);
+    test("*", TokenKind::Asterisk);
+    test("/", TokenKind::Slash);
+    test("(", TokenKind::LParen);
+    test(")", TokenKind::RParen);
+    test("{", TokenKind::LCurly);
+    test("}", TokenKind::RCurly);
+    test("[", TokenKind::LSquare);
+    test("]", TokenKind::RSquare);
+    test(";", TokenKind::Semicolon);
+    test(",", TokenKind::Comma);
+    test("=", TokenKind::Equal);
+    test("==", TokenKind::DoubleEqual);
+    test(">", TokenKind::GreaterThan);
+    test("<", TokenKind::LessThan);
+    test("!=", TokenKind::ExclamationMarkEqual);
+    test(">=", TokenKind::GreaterOrEqual);
+    test("<=", TokenKind::LessOrEqual);
+    test("&&", TokenKind::DoubleAmpersand);
+    test("&", TokenKind::Ampersand);
+    test("||", TokenKind::DoublePipe);
+    test("|", TokenKind::Pipe);
+    test("^", TokenKind::Caret);
+    test("!", TokenKind::ExclamationMark);
+    test("?", TokenKind::QuestionMark);
+    test(":", TokenKind::Colon);
+    test(".", TokenKind::Period);
+    test("%", TokenKind::Percent);
+    test("+=", TokenKind::PlusEqual);
+    test("-=", TokenKind::MinusEqual);
+    test("*=", TokenKind::AsteriskEqual);
+    test("/=", TokenKind::SlashEqual);
+    test("++", TokenKind::DoublePlus);
+    test("--", TokenKind::DoubleMinus);
+    test("&=", TokenKind::AmpersandEqual);
+    test("|=", TokenKind::PipeEqual);
+    test("^=", TokenKind::CaretEqual);
+    test("%=", TokenKind::PercentEqual);
+    test("->", TokenKind::Arrow);
 }

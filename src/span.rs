@@ -1,4 +1,4 @@
-#[derive(Clone, Debug, Copy, PartialEq, Eq, Default)]
+#[derive(Clone, Debug, Copy, Eq, Default)]
 pub struct Span {
     pub start: u32,
     pub end: u32,
@@ -13,10 +13,10 @@ impl Span {
     }
 }
 
-// impl PartialEq for Span {
-//     fn eq(&self, other: &Self) -> bool {
-//         // This is implemented in this way so that == comparisons between
-//         // two nodes that contain differens `Span`s compare equal.
-//         true
-//     }
-// }
+impl PartialEq for Span {
+    fn eq(&self, _other: &Self) -> bool {
+        // This is implemented in this way so that == comparisons between
+        // two nodes that contain differens `Span`s compare equal.
+        true
+    }
+}
