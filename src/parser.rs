@@ -32,8 +32,11 @@ pub enum ParsingError {
     ExpectedGlobalDecl {
         found: Token,
     },
-    IntLiteralTooBig {
+    IntLiteralOutOfRange {
         found: Token,
+    },
+    NegativeArrayLen {
+        len_tok: Token,
     },
     UnexpectedEndOfInput,
 }
@@ -194,6 +197,8 @@ impl<'t> Parser<'t> {
                         found: self.current()?,
                         msg: "Expected ';' after global-level variable declaration",
                     });
+                } else {
+                    self.advance();
                 }
                 let span = decl.span;
                 Ok(GlobalDeclaration {
@@ -211,7 +216,7 @@ impl<'t> Parser<'t> {
                 let block = self.parse_block(bump)?;
                 let span = block.span;
                 let kind = bump.alloc(StmtKind::Block(block));
-                Stmt { kind, span }
+                return Ok(Stmt { kind, span });
             }
             TokenKind::Keyword(KeywordKind::Continue) => {
                 self.advance();
@@ -225,16 +230,10 @@ impl<'t> Parser<'t> {
                 let kind = bump.alloc(StmtKind::Break(Break { span }));
                 Stmt { kind, span }
             }
-            TokenKind::Keyword(KeywordKind::Return) => self.parse_return_stmt(bump)?,
-            TokenKind::Keyword(KeywordKind::While) => {
-                return self.parse_while_loop(bump);
-            }
-            TokenKind::Keyword(KeywordKind::For) => {
-                return self.parse_for_loop(bump);
-            }
-            TokenKind::Keyword(KeywordKind::If) => {
-                return self.parse_if_stmt(bump);
-            }
+            TokenKind::Keyword(KeywordKind::Return) => return self.parse_return_stmt(bump),
+            TokenKind::Keyword(KeywordKind::While) => return self.parse_while_loop(bump),
+            TokenKind::Keyword(KeywordKind::For) => return self.parse_for_loop(bump),
+            TokenKind::Keyword(KeywordKind::If) => return self.parse_if_stmt(bump),
             TokenKind::Keyword(KeywordKind::Let) => {
                 let decl = self.parse_variable_decl(bump)?;
                 let span = token.span;
@@ -253,6 +252,11 @@ impl<'t> Parser<'t> {
         if self.match_token(TokenKind::Semicolon)? {
             self.advance()
         } else {
+            self.errors.push(ParsingError::ExpectedOtherToken {
+                expected: TokenKind::Semicolon,
+                found: self.current()?,
+                msg: "Expected ';' after expression statement",
+            });
             self.recover_stmt()?;
         }
         Ok(stmt)
@@ -354,9 +358,14 @@ impl<'t> Parser<'t> {
                     "Expected ';' in array type separating element type and size",
                 )?;
                 let token = self.current()?;
-                let TokenKind::IntLiteral { value } = token.kind else {
+                let TokenKind::IntLiteral { value, minus } = token.kind else {
                     return Err(ParsingError::ExpectedArraySize { found: token });
                 };
+                if minus {
+                    self.errors.push(ParsingError::NegativeArrayLen {
+                        len_tok: token.clone(),
+                    });
+                }
                 self.advance();
                 let end_tok =
                     self.expect(TokenKind::RSquare, "Expected ']' at end of array type")?;
@@ -411,11 +420,11 @@ impl<'t> Parser<'t> {
         )?;
         let typ = self.parse_type(bump)?;
         let mut span = Span::new(let_kw.span.start, typ.span.end);
-        let init_value = if self.match_token(TokenKind::Equal)? {
+        let init_value = if let Ok(true) = self.match_token(TokenKind::Equal) {
             self.advance();
             let expr = self.parse_expr(bump)?;
             span.end = expr.span.end;
-            Some(self.parse_expr(bump)?)
+            Some(expr)
         } else {
             None
         };
@@ -491,7 +500,7 @@ impl<'t> Parser<'t> {
         })
     }
     fn parse_block<'a>(&mut self, bump: &'a Bump) -> Result<Block<'a>> {
-        let lcurly = self.expect_or_ice(TokenKind::LCurly);
+        let lcurly = self.expect(TokenKind::LCurly, "Expected '{' to start block")?;
         let mut statements = BumpVec::new_in(bump);
         while !self.match_token(TokenKind::RCurly)? {
             match self.parse_stmt(bump) {
@@ -590,6 +599,7 @@ impl<'t> Parser<'t> {
     fn parse_return_stmt<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
         let return_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Return));
         if self.match_token(TokenKind::Semicolon)? {
+            self.advance();
             let stmt = bump.alloc(StmtKind::ReturnStmt(ReturnStmt {
                 value: None,
                 span: return_kw.span,
@@ -600,6 +610,7 @@ impl<'t> Parser<'t> {
             });
         }
         let value = self.parse_expr(bump)?;
+        self.expect(TokenKind::Semicolon, "Expected ';' after return stmt")?;
         let span = Span::new(return_kw.span.start, value.span.end);
 
         let stmt = bump.alloc(StmtKind::ReturnStmt(ReturnStmt {
@@ -702,14 +713,15 @@ impl<'t> Parser<'t> {
                 Ok(Some(expr))
             }
             TokenKind::LSquare => Ok(Some(self.parse_array_init(bump)?)),
-            TokenKind::IntLiteral { value } => {
+            TokenKind::IntLiteral { value, minus } => {
                 self.advance();
                 let span = token.span;
-                let value: i64 = match value.try_into() {
-                    Ok(v) => v,
-                    Err(_e) => {
+                let value: i64 = match (value, minus) {
+                    v @ (0..=9_223_372_036_854_775_807, false) => v.0 as i64,
+                    v @ (0..=9_223_372_036_854_775_808, true) => (v.0 as i64).wrapping_neg(),
+                    _ => {
                         self.errors
-                            .push(ParsingError::IntLiteralTooBig { found: token });
+                            .push(ParsingError::IntLiteralOutOfRange { found: token });
                         0
                     }
                 };
@@ -989,24 +1001,10 @@ impl<'t> Parser<'t> {
 
 #[cfg(test)]
 mod tests {
+
     use crate::lexer::Lexer;
 
     use super::*;
-    fn compare_types(s: &str, expected: Type<'_>) {
-        use utils::*;
-        let tokens = lex(s);
-        let mut parser = Parser::new(&tokens);
-        let bump = Bump::new();
-        let parsed = parser.parse_type(&bump);
-        let typ = match parsed {
-            Ok(t) => t,
-            Err(_e) => {
-                panic!("{s} did not parse properly");
-            }
-        };
-        assert!(parser.is_at_end());
-        assert_eq!(typ, expected);
-    }
     #[macro_use]
     mod utils {
         use bumpalo::collections::CollectIn;
@@ -1018,35 +1016,58 @@ mod tests {
             assert!(!lexed.has_errors());
             lexed.tokens
         }
-        pub fn a<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("a"))), Span::empty())
+
+        thread_local! {
+            static BUMP: &'static Bump = Box::leak(Box::new(Bump::new()));
         }
-        pub fn b<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("b"))), Span::empty())
+
+        pub fn bump() -> &'static Bump {
+            BUMP.with(|b| *b)
         }
-        pub fn c<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("c"))), Span::empty())
+        pub fn num(n: i64) -> Expr<'static> {
+            Expr::new(
+                bump().alloc(ExprKind::Int(Int {
+                    lit: IntLiteral {
+                        kind: IntLiteralKind::I64(n),
+                        span: Span::empty(),
+                    },
+                    span: Span::empty(),
+                })),
+                Span::empty(),
+            )
         }
-        pub fn d<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("d"))), Span::empty())
+        pub fn a() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("a"))), Span::empty())
         }
-        pub fn e<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("e"))), Span::empty())
+        pub fn b() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("b"))), Span::empty())
         }
-        pub fn f<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("f"))), Span::empty())
+        pub fn c() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("c"))), Span::empty())
         }
-        pub fn g<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Ident(ident("g"))), Span::empty())
+        pub fn d() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("d"))), Span::empty())
         }
-        pub fn ident<'a>(s: &'a str) -> Ident<'a> {
+        pub fn e() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("e"))), Span::empty())
+        }
+        pub fn f() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("f"))), Span::empty())
+        }
+        pub fn g() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("g"))), Span::empty())
+        }
+        pub fn i() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Ident(ident("i"))), Span::empty())
+        }
+        pub fn ident(s: &str) -> Ident<'_> {
             Ident {
                 ident: s,
                 span: Span::empty(),
             }
         }
-        pub fn ptr<'a>(pointee: Type<'a>, bump: &'a Bump) -> Type<'a> {
-            Type::new(bump.alloc(TypeKind::Ptr { pointee }), Span::empty())
+        pub fn ptr(pointee: Type<'static>) -> Type<'static> {
+            Type::new(bump().alloc(TypeKind::Ptr { pointee }), Span::empty())
         }
         pub fn void() -> Type<'static> {
             Type::new(&TypeKind::Void, Span::empty())
@@ -1054,55 +1075,53 @@ mod tests {
         pub fn int() -> Type<'static> {
             Type::new(&TypeKind::Int(IntType::I64), Span::empty())
         }
-        pub fn struct_<'a>(s: &'a str, bump: &'a Bump) -> Type<'a> {
+        pub fn struct_(s: &'static str) -> Type<'static> {
             Type::new(
-                bump.alloc(TypeKind::Struct { name: ident(s) }),
+                bump().alloc(TypeKind::Struct { name: ident(s) }),
                 Span::empty(),
             )
         }
-        pub fn array<'a>(t: Type<'a>, len: u64, bump: &'a Bump) -> Type<'a> {
+        pub fn array(t: Type<'static>, len: u64) -> Type<'static> {
             Type::new(
-                bump.alloc(TypeKind::Array {
+                bump().alloc(TypeKind::Array {
                     element_type: t,
                     size: len,
                 }),
                 Span::empty(),
             )
         }
-        pub fn func_ptr<'a>(
-            param_types: Vec<Type<'a>>,
-            return_type: Option<Type<'a>>,
-            bump: &'a Bump,
-        ) -> Type<'a> {
-            let mut v = BumpVec::new_in(bump);
+        pub fn func_ptr(
+            param_types: Vec<Type<'static>>,
+            return_type: Option<Type<'static>>,
+        ) -> Type<'static> {
+            let mut v = BumpVec::new_in(bump());
             for i in param_types {
                 v.push(i.clone())
             }
             Type::new(
-                bump.alloc(TypeKind::FuncPtr {
+                bump().alloc(TypeKind::FuncPtr {
                     return_type,
                     param_types: v,
                 }),
                 Span::empty(),
             )
         }
-        pub fn cast<'a>(from: Expr<'a>, to: Type<'a>, bump: &'a Bump) -> Expr<'a> {
+        pub fn cast(from: Expr<'static>, to: Type<'static>) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::Cast(Cast {
+                bump().alloc(ExprKind::Cast(Cast {
                     to_type: to,
                     expr: from,
                 })),
                 Span::empty(),
             )
         }
-        pub fn binop<'a>(
-            lhs: Expr<'a>,
-            rhs: Expr<'a>,
+        pub fn binop(
+            lhs: Expr<'static>,
+            rhs: Expr<'static>,
             op_type: BinaryOpKind,
-            bump: &'a Bump,
-        ) -> Expr<'a> {
+        ) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::BinaryOp(BinaryOp {
+                bump().alloc(ExprKind::BinaryOp(BinaryOp {
                     kind: op_type,
                     left: lhs,
                     right: rhs,
@@ -1111,9 +1130,9 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn prefix_op<'a>(expr: Expr<'a>, op_type: PrefixOpKind, bump: &'a Bump) -> Expr<'a> {
+        pub fn prefix_op(expr: Expr<'static>, op_type: PrefixOpKind) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::PrefixOp(PrefixOp {
+                bump().alloc(ExprKind::PrefixOp(PrefixOp {
                     kind: op_type,
                     expr,
                     span: Span::empty(),
@@ -1121,9 +1140,9 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn postfix_op<'a>(expr: Expr<'a>, op_type: PostfixOpKind, bump: &'a Bump) -> Expr<'a> {
+        pub fn postfix_op(expr: Expr<'static>, op_type: PostfixOpKind) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::PostfixOp(PostfixOp {
+                bump().alloc(ExprKind::PostfixOp(PostfixOp {
                     kind: op_type,
                     expr,
                     span: Span::empty(),
@@ -1131,14 +1150,13 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn ternary<'a>(
-            condition: Expr<'a>,
-            true_branch: Expr<'a>,
-            false_branch: Expr<'a>,
-            bump: &'a Bump,
-        ) -> Expr<'a> {
+        pub fn ternary(
+            condition: Expr<'static>,
+            true_branch: Expr<'static>,
+            false_branch: Expr<'static>,
+        ) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::Ternary(Ternary {
+                bump().alloc(ExprKind::Ternary(Ternary {
                     condition,
                     true_branch,
                     false_branch,
@@ -1147,23 +1165,19 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn func_call<'a>(func_expr: Expr<'a>, args: Vec<Expr<'a>>, bump: &'a Bump) -> Expr<'a> {
+        pub fn func_call(func_expr: Expr<'static>, args: Vec<Expr<'static>>) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::FunctionCall(FunctionCall {
+                bump().alloc(ExprKind::FunctionCall(FunctionCall {
                     func_expr,
-                    args: args.into_iter().collect_in(bump),
+                    args: args.into_iter().collect_in(bump()),
                     span: Span::empty(),
                 })),
                 Span::empty(),
             )
         }
-        pub fn member_access<'a, 's: 'a>(
-            expr: Expr<'a>,
-            member: &'s str,
-            bump: &'a Bump,
-        ) -> Expr<'a> {
+        pub fn member_access(expr: Expr<'static>, member: &'static str) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::MemberAccess(MemberAccess {
+                bump().alloc(ExprKind::MemberAccess(MemberAccess {
                     struct_expr: expr,
                     member_name: ident(member),
                     span: Span::empty(),
@@ -1171,13 +1185,9 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn pointer_member_access<'a, 's: 'a>(
-            expr: Expr<'a>,
-            member: &'s str,
-            bump: &'a Bump,
-        ) -> Expr<'a> {
+        pub fn pointer_member_access(expr: Expr<'static>, member: &'static str) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::PointerMemberAccess(PointerMemberAccess {
+                bump().alloc(ExprKind::PointerMemberAccess(PointerMemberAccess {
                     struct_ptr_expr: expr,
                     member_name: ident(member),
                     span: Span::empty(),
@@ -1185,9 +1195,9 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn array_index<'a>(expr: Expr<'a>, index: Expr<'a>, bump: &'a Bump) -> Expr<'a> {
+        pub fn array_index(expr: Expr<'static>, index: Expr<'static>) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::ArrayIndex(ArrayIndex {
+                bump().alloc(ExprKind::ArrayIndex(ArrayIndex {
                     array: expr,
                     index,
                     span: Span::empty(),
@@ -1195,215 +1205,338 @@ mod tests {
                 Span::empty(),
             )
         }
-        pub fn sizeof<'a>(typ: Type<'a>, bump: &'a Bump) -> Expr<'a> {
+        pub fn sizeof(typ: Type<'static>) -> Expr<'static> {
             Expr::new(
-                bump.alloc(ExprKind::SizeOfType(SizeOfType {
+                bump().alloc(ExprKind::SizeOfType(SizeOfType {
                     typ,
                     span: Span::empty(),
                 })),
                 Span::empty(),
             )
         }
-        pub fn nullptr<'a>(bump: &'a Bump) -> Expr<'a> {
-            Expr::new(bump.alloc(ExprKind::Nullptr(Nullptr)), Span::empty())
+        pub fn nullptr() -> Expr<'static> {
+            Expr::new(bump().alloc(ExprKind::Nullptr(Nullptr)), Span::empty())
         }
-        pub fn get_type<'a>(s: &str, bump: &'a Bump) -> Type<'a> {
+        pub fn get_type(s: &str) -> Type<'static> {
             let tokens = lex(s);
             let mut parser = Parser::new(&tokens);
-            let output = parser.parse_type(bump).unwrap();
+            let output = parser.parse_type(bump()).unwrap();
             assert!(parser.is_at_end(), "{parser:?}");
             output
         }
+        pub fn add(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Add)
+        }
+        pub fn sub(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Sub)
+        }
+        pub fn mul(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Mul)
+        }
+        pub fn div(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Div)
+        }
+        pub fn eq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Eq)
+        }
+        pub fn gt(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Greater)
+        }
+        pub fn lt(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Less)
+        }
+        pub fn geq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::GreaterOrEqual)
+        }
+        pub fn leq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::LessOrEqual)
+        }
+        pub fn noteq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::NotEq)
+        }
+        pub fn and(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::And)
+        }
+        pub fn or(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Or)
+        }
+        pub fn bitand(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::BitAnd)
+        }
+        pub fn bitor(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::BitOr)
+        }
+        pub fn xor(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Xor)
+        }
+        pub fn mod_(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Mod)
+        }
+        pub fn addeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::AddAssign)
+        }
+        pub fn subeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::SubAssign)
+        }
+        pub fn muleq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::MulAssign)
+        }
+        pub fn diveq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::DivAssign)
+        }
+        pub fn andeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::BitAndAssign)
+        }
+        pub fn oreq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::BitOrAssign)
+        }
+        pub fn xoreq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::XorAssign)
+        }
+        pub fn modeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::ModAssign)
+        }
+        pub fn assign(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+            binop(lhs, rhs, BinaryOpKind::Assign)
+        }
 
-        macro_rules! anchor {
-            ($bump:ident) => {{
-                let ptr = |pointee| ptr(pointee, $bump);
-                let struct_ = |s| struct_(s, $bump);
-                let array = |t, len| array(t, len, $bump);
-                let func_ptr = |param_types, return_type| func_ptr(param_types, return_type, $bump);
-                let cast = |from, to| cast(from, to, $bump);
+        pub fn prefix_increment(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::Increment)
+        }
+        pub fn prefix_decrement(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::Decrement)
+        }
+        pub fn unary_plus(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::UnaryPlus)
+        }
+        pub fn unary_minus(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::UnaryMinus)
+        }
+        pub fn addr_of(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::AddressOf)
+        }
+        pub fn dereference(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::Dereference)
+        }
+        pub fn not(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::Not)
+        }
+        pub fn bitnot(expr: Expr<'static>) -> Expr<'static> {
+            prefix_op(expr, PrefixOpKind::BitNot)
+        }
 
-                let ternary = |cond, t_br, f_br| ternary(cond, t_br, f_br, $bump);
-                let func_call = |func_expr, args| func_call(func_expr, args, $bump);
-                let member_access = |expr, member| member_access(expr, member, $bump);
-                let pointer_member_access =
-                    |expr, member| pointer_member_access(expr, member, $bump);
-                let array_index = |expr, index| array_index(expr, index, $bump);
-                let sizeof = |typ| sizeof(typ, $bump);
-                let nullptr = || nullptr($bump);
-                let get_type = |s| get_type(s, $bump);
-                let add = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Add, $bump);
-                let sub = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Sub, $bump);
-                let mul = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Mul, $bump);
-                let div = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Div, $bump);
-                let eq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Eq, $bump);
-                let gt = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Greater, $bump);
-                let lt = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Less, $bump);
-                let geq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::GreaterOrEqual, $bump);
-                let leq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::LessOrEqual, $bump);
-                let noteq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::NotEq, $bump);
-                let and = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::And, $bump);
-                let or = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Or, $bump);
-                let bitand = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::BitAnd, $bump);
-                let bitor = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::BitOr, $bump);
-                let xor = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Xor, $bump);
-                let mod_ = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Mod, $bump);
-                let addeq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::AddAssign, $bump);
-                let subeq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::SubAssign, $bump);
-                let muleq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::MulAssign, $bump);
-                let diveq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::DivAssign, $bump);
-                let andeq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::BitAndAssign, $bump);
-                let oreq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::BitOrAssign, $bump);
-                let xoreq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::XorAssign, $bump);
-                let modeq = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::ModAssign, $bump);
-                let assign = |lhs, rhs| binop(lhs, rhs, BinaryOpKind::Assign, $bump);
-
-                let prefix_increment = |expr| prefix_op(expr, PrefixOpKind::Increment, $bump);
-                let prefix_decrement = |expr| prefix_op(expr, PrefixOpKind::Decrement, $bump);
-                let unary_plus = |expr| prefix_op(expr, PrefixOpKind::UnaryPlus, $bump);
-                let unary_minus = |expr| prefix_op(expr, PrefixOpKind::UnaryMinus, $bump);
-                let addr_or = |expr| prefix_op(expr, PrefixOpKind::AddressOf, $bump);
-                let dereference = |expr| prefix_op(expr, PrefixOpKind::Dereference, $bump);
-                let not = |expr| prefix_op(expr, PrefixOpKind::Not, $bump);
-                let bitnot = |expr| prefix_op(expr, PrefixOpKind::BitNot, $bump);
-
-                let suffix_increment = |expr| postfix_op(expr, PostfixOpKind::Increment, $bump);
-                let suffix_decrement = |expr| postfix_op(expr, PostfixOpKind::Decrement, $bump);
-                let a = || a($bump);
-                let b = || b($bump);
-                let c = || c($bump);
-                let d = || d($bump);
-                let e = || e($bump);
-                let f = || f($bump);
-                let g = || g($bump);
-                (
-                    ptr,
-                    struct_,
-                    array,
-                    func_ptr,
-                    cast,
-                    binop,
-                    prefix_op,
-                    postfix_op,
-                    ternary,
-                    func_call,
-                    member_access,
-                    pointer_member_access,
-                    array_index,
-                    sizeof,
-                    nullptr,
-                    get_type,
-                    add,
-                    sub,
-                    mul,
-                    div,
-                    eq,
-                    gt,
-                    lt,
-                    geq,
-                    leq,
-                    noteq,
-                    and,
-                    or,
-                    bitand,
-                    bitor,
-                    xor,
-                    mod_,
-                    addeq,
-                    subeq,
-                    muleq,
-                    diveq,
-                    andeq,
-                    oreq,
-                    xoreq,
-                    modeq,
-                    assign,
-                    prefix_increment,
-                    prefix_decrement,
-                    unary_plus,
-                    unary_minus,
-                    addr_or,
-                    dereference,
-                    not,
-                    bitnot,
-                    suffix_increment,
-                    suffix_decrement,
-                    a,
-                    b,
-                    c,
-                    d,
-                    e,
-                    f,
-                    g,
-                )
-            }};
+        pub fn suffix_increment(expr: Expr<'static>) -> Expr<'static> {
+            postfix_op(expr, PostfixOpKind::Increment)
+        }
+        pub fn suffix_decrement(expr: Expr<'static>) -> Expr<'static> {
+            postfix_op(expr, PostfixOpKind::Decrement)
+        }
+        pub fn struct_init(
+            name: Ident<'static>,
+            inits: Vec<(Ident<'static>, Expr<'static>)>,
+        ) -> Expr<'static> {
+            Expr::new(
+                bump().alloc(ExprKind::StructInit(StructInit {
+                    name,
+                    field_inits: inits.into_iter().collect_in(bump()),
+                    span: Span::empty(),
+                })),
+                Span::empty(),
+            )
+        }
+        pub fn array_init(exprs: Vec<Expr<'static>>) -> Expr<'static> {
+            Expr::new(
+                bump().alloc(ExprKind::ArrayInit(ArrayInit {
+                    elements: exprs.into_iter().collect_in(bump()),
+                    span: Span::empty(),
+                })),
+                Span::empty(),
+            )
+        }
+        pub fn return_stmt(r: Option<Expr<'static>>) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::ReturnStmt(ReturnStmt {
+                    value: r,
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn block(stmts: Vec<Stmt<'static>>) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::Block(Block {
+                    body: stmts.into_iter().collect_in(bump()),
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn bblock(stmts: Vec<Stmt<'static>>) -> Block<'static> {
+            Block {
+                body: stmts.into_iter().collect_in(bump()),
+                span: Span::empty(),
+            }
+        }
+        pub fn break_() -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::Break(Break {
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn continue_() -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::Continue(Continue {
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn if_stmt(
+            condition: Expr<'static>,
+            then_branch: Stmt<'static>,
+            else_branch: Option<Stmt<'static>>,
+        ) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::IfStmt(IfStmt {
+                    condition,
+                    then_branch,
+                    else_branch,
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn while_loop(condition: Expr<'static>, body: Stmt<'static>) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::WhileLoop(WhileLoop {
+                    condition,
+                    body,
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn for_loop(
+            init: Option<Stmt<'static>>,
+            condition: Option<Expr<'static>>,
+            post: Option<Expr<'static>>,
+            body: Stmt<'static>,
+        ) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::ForLoop(ForLoop {
+                    init,
+                    condition,
+                    post,
+                    body,
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn exprstmt(expr: Expr<'static>) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::Expr(expr)),
+                span: Span::empty(),
+            }
+        }
+        pub fn variable_decl(
+            name: Ident<'static>,
+            typ: Type<'static>,
+            init: Option<Expr<'static>>,
+        ) -> Stmt<'static> {
+            Stmt {
+                kind: bump().alloc(StmtKind::VariableDeclaration(VariableDeclaration {
+                    var_type: typ,
+                    name,
+                    init_value: init,
+                    span: Span::empty(),
+                })),
+                span: Span::empty(),
+            }
+        }
+        pub fn func_decl(
+            name: Ident<'static>,
+            params: Vec<(Ident<'static>, Type<'static>)>,
+            return_type: Option<Type<'static>>,
+            body: Block<'static>,
+        ) -> FunctionDeclaration<'static> {
+            use utils::*;
+            FunctionDeclaration {
+                return_type,
+                name,
+                params: params.into_iter().collect_in(bump()),
+                body,
+                span: Span::empty(),
+            }
+        }
+        pub fn struct_decl(
+            name: Ident<'static>,
+            fields: Vec<(Ident<'static>, Type<'static>)>,
+        ) -> StructDeclaration<'static> {
+            use utils::*;
+            StructDeclaration {
+                name,
+                fields: fields.into_iter().collect_in(bump()),
+                span: Span::empty(),
+            }
         }
     }
+
+    #[test]
+    fn test_number_parse() {
+        fn compare(s: &str, expected: i64) {
+            use utils::*;
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            let atom = parser.parse_atom(bump()).unwrap().unwrap();
+            let ExprKind::Int(Int {
+                lit:
+                    IntLiteral {
+                        kind: IntLiteralKind::I64(parsed),
+                        ..
+                    },
+                ..
+            }) = atom.kind
+            else {
+                unreachable!();
+            };
+            assert_eq!(*parsed, expected)
+        }
+        fn assert_fail(s: &str) {
+            use utils::*;
+            let tokens = lex(s);
+            let mut parser = Parser::new(&tokens);
+            let res = parser.parse_atom(bump()).is_err();
+            assert!(res || !parser.is_at_end() || !parser.errors.is_empty());
+        }
+        compare("9223372036854775807", 9223372036854775807);
+        compare("0", 0);
+        compare("-9223372036854775808", -9223372036854775808);
+        assert_fail("-9223372036854775809");
+        assert_fail("9223372036854775808");
+    }
+
+    fn compare_types(s: &str, expected: Type<'_>) {
+        use utils::*;
+        let tokens = lex(s);
+        let mut parser = Parser::new(&tokens);
+        let parsed = parser.parse_type(bump());
+        let typ = match parsed {
+            Ok(t) => t,
+            Err(_e) => {
+                panic!("{s} did not parse properly");
+            }
+        };
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(typ, expected);
+    }
+
     #[test]
     fn test_type_parsing_valid() {
         use utils::*;
-        let bump = &Bump::new();
-        #[allow(unused)]
-        let (
-            ptr,
-            struct_,
-            array,
-            func_ptr,
-            cast,
-            binop,
-            prefix_op,
-            postfix_op,
-            ternary,
-            func_call,
-            member_access,
-            pointer_member_access,
-            array_index,
-            sizeof,
-            nullptr,
-            get_type,
-            add,
-            sub,
-            mul,
-            div,
-            eq,
-            gt,
-            lt,
-            geq,
-            leq,
-            noteq,
-            and,
-            or,
-            bitand,
-            bitor,
-            xor,
-            mod_,
-            addeq,
-            subeq,
-            muleq,
-            diveq,
-            andeq,
-            oreq,
-            xoreq,
-            modeq,
-            assign,
-            prefix_increment,
-            prefix_decrement,
-            unary_plus,
-            unary_minus,
-            addr_or,
-            dereference,
-            not,
-            bitnot,
-            suffix_increment,
-            suffix_decrement,
-            a,
-            b,
-            c,
-            d,
-            e,
-            f,
-            g,
-        ) = anchor!(bump);
         compare_types("void", void());
         compare_types("*void", ptr(void()));
         compare_types("***void", ptr(ptr(ptr(void()))));
@@ -1477,7 +1610,6 @@ mod tests {
     #[test]
     fn test_type_parsing_fail() {
         use utils::*;
-        let bump = &Bump::new();
         let failing_tests = [
             "[int 10]",
             "[int;]",
@@ -1497,7 +1629,7 @@ mod tests {
         for s in failing_tests {
             let tokens = lex(s);
             let mut parser = Parser::new(&tokens);
-            let res = parser.parse_type(bump).is_err();
+            let res = parser.parse_type(bump()).is_err();
             assert!(res || !parser.is_at_end() || !parser.errors.is_empty());
         }
     }
@@ -1505,78 +1637,17 @@ mod tests {
     #[track_caller]
     fn compare_exprs(s: &str, expected: Expr<'_>) {
         use utils::*;
-        let bump = Bump::new();
         let tokens = lex(s);
         let mut parser = Parser::new(&tokens);
-        let parsed = parser.parse_expr(&bump).expect("Should parse correctly");
+        let parsed = parser.parse_expr(bump()).expect("Should parse correctly");
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
         assert_eq!(parsed, expected);
     }
 
     #[test]
     fn test_expr_parsing_valid() {
         use utils::*;
-        let bump = &Bump::new();
-        #[allow(unused)]
-        let (
-            ptr,
-            struct_,
-            array,
-            func_ptr,
-            cast,
-            binop,
-            prefix_op,
-            postfix_op,
-            ternary,
-            func_call,
-            member_access,
-            pointer_member_access,
-            array_index,
-            sizeof,
-            nullptr,
-            get_type,
-            add,
-            sub,
-            mul,
-            div,
-            eq,
-            gt,
-            lt,
-            geq,
-            leq,
-            noteq,
-            and,
-            or,
-            bitand,
-            bitor,
-            xor,
-            mod_,
-            addeq,
-            subeq,
-            muleq,
-            diveq,
-            andeq,
-            oreq,
-            xoreq,
-            modeq,
-            assign,
-            prefix_increment,
-            prefix_decrement,
-            unary_plus,
-            unary_minus,
-            addr_of,
-            dereference,
-            not,
-            bitnot,
-            suffix_increment,
-            suffix_decrement,
-            a,
-            b,
-            c,
-            d,
-            e,
-            f,
-            g,
-        ) = anchor!(bump);
         compare_exprs("a as int", cast(a(), get_type("int")));
         compare_exprs("a+b", add(a(), b()));
         compare_exprs("a-b", sub(a(), b()));
@@ -1624,6 +1695,8 @@ mod tests {
         compare_exprs("nullptr", nullptr());
         // Should fail in type checking, but parser should allow it
         compare_exprs("*nullptr", dereference(nullptr()));
+        compare_exprs("~a", bitnot(a()));
+        compare_exprs("~!!++a", bitnot(not(not(prefix_increment(a())))));
 
         compare_exprs("(((((((((((a)))))))))))", a());
         compare_exprs("a as int", cast(a(), get_type("int")));
@@ -1908,7 +1981,6 @@ mod tests {
     #[test]
     fn test_expr_parsing_fail() {
         use utils::*;
-        let bump = &Bump::new();
         let failing_tests = [
             "a + ",
             "a * ",
@@ -1960,10 +2032,952 @@ mod tests {
             let lexed = lex(s);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_expr(bump).is_err()
+                parser.parse_expr(bump()).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
+        }
+    }
+
+    #[track_caller]
+    fn compare_struct_init(s: &str, expected: Expr<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_struct_init(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_struct_init_valid() {
+        use utils::*;
+        compare_struct_init("MyStruct {}", struct_init(ident("MyStruct"), vec![]));
+        compare_struct_init(
+            "MyStruct {a: b}",
+            struct_init(ident("MyStruct"), vec![(ident("a"), b())]),
+        );
+        compare_struct_init(
+            "MyStruct {a: b,}",
+            struct_init(ident("MyStruct"), vec![(ident("a"), b())]),
+        );
+        compare_struct_init(
+            "MyStruct {a: b, c: d}",
+            struct_init(
+                ident("MyStruct"),
+                vec![(ident("a"), b()), (ident("c"), d())],
+            ),
+        );
+        compare_struct_init(
+            "MyStruct {a: b+c, d: e?f:g}",
+            struct_init(
+                ident("MyStruct"),
+                vec![
+                    (ident("a"), add(b(), c())),
+                    (ident("d"), ternary(e(), f(), g())),
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn test_struct_init_invalid() {
+        use utils::*;
+        let fails = [
+            "MyStruct {",
+            "MyStruct {a:}",
+            "MyStruct {a b}",
+            "MyStruct {a: b c: d}",
+            "MyStruct {a: b, c d}",
+            "MyStruct {a: b, c:}",
+            "MyStruct {a: b, : d}",
+            "MyStruct {a: b, c: d,,}",
+            "MyStruct {a: b, c: d e: f}",
+            "struct MyStruct {a: b, c: d}",
+            "struct {a: b, c:d}",
+            "struct MyStruct a: b, c: d}",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_struct_init(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_array_init(s: &str, expected: Expr<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_array_init(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_array_init_valid() {
+        use utils::*;
+        compare_array_init("[]", array_init(vec![]));
+        compare_array_init("[a]", array_init(vec![a()]));
+        compare_array_init("[a, b, c, d, e]", array_init(vec![a(), b(), c(), d(), e()]));
+        compare_array_init(
+            "[a ? b : c, c+d, d+e, f->d]",
+            array_init(vec![
+                ternary(a(), b(), c()),
+                add(c(), d()),
+                add(d(), e()),
+                pointer_member_access(f(), "d"),
+            ]),
+        );
+        compare_array_init(
+            "[[a, b], [c, d]]",
+            array_init(vec![array_init(vec![a(), b()]), array_init(vec![c(), d()])]),
+        );
+        compare_array_init(
+            "[[[[a]]]]",
+            array_init(vec![array_init(vec![array_init(vec![array_init(vec![
+                a(),
+            ])])])]),
+        );
+        compare_array_init(
+            "[MyStruct {a: b}, MyStruct {d: e}]",
+            array_init(vec![
+                struct_init(ident("MyStruct"), vec![(ident("a"), b())]),
+                struct_init(ident("MyStruct"), vec![(ident("d"), e())]),
+            ]),
+        );
+    }
+
+    #[test]
+    fn test_array_init_invalid() {
+        use utils::*;
+        let fails = ["[0; 1]", "[0 1]", "[0, 1}", "[}"];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_array_init(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_return(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_return_stmt(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_return_stmt_valid() {
+        use utils::*;
+        compare_return("return;", return_stmt(None));
+        compare_return("return a;", return_stmt(Some(a())));
+        compare_return("return a+b;", return_stmt(Some(add(a(), b()))));
+        compare_return(
+            "return a ? b : c;",
+            return_stmt(Some(ternary(a(), b(), c()))),
+        );
+        compare_return(
+            "return Something {a: b};",
+            return_stmt(Some(struct_init(
+                ident("Something"),
+                vec![(ident("a"), b())],
+            ))),
+        );
+    }
+
+    #[track_caller]
+    fn compare_while(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_while_loop(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_while_stmt_valid() {
+        use utils::*;
+        compare_while("while (a) {}", while_loop(a(), block(vec![])));
+        compare_while("while (a) b;", while_loop(a(), exprstmt(b())));
+        compare_while("while (a) return;", while_loop(a(), return_stmt(None)));
+        compare_while(
+            "while (b) {return;}",
+            while_loop(b(), block(vec![return_stmt(None)])),
+        );
+    }
+
+    #[test]
+    fn test_while_stmt_invalid() {
+        use utils::*;
+        let fails = [
+            "while a {}",
+            "while(){}",
+            "while a) {}",
+            "while a (a) {}",
+            "while (a {}",
+            "while (a) ",
+            "while (a) return",
+            "while ()",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_while_loop(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_block(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = Stmt {
+            kind: bump().alloc(StmtKind::Block(parser.parse_block(bump()).unwrap())),
+            span: Span::empty(),
+        };
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_block_stmt_valid() {
+        use utils::*;
+        compare_block("{}", block(vec![]));
+        compare_block("{return;}", block(vec![return_stmt(None)]));
+        compare_block("{return a;}", block(vec![return_stmt(Some(a()))]));
+        compare_block(
+            "{return a+b;}",
+            block(vec![return_stmt(Some(add(a(), b())))]),
+        );
+        compare_block(
+            "{return a; return b;}",
+            block(vec![return_stmt(Some(a())), return_stmt(Some(b()))]),
+        );
+        compare_block(
+            "{return; return a; return a+b;}",
+            block(vec![
+                return_stmt(None),
+                return_stmt(Some(a())),
+                return_stmt(Some(add(a(), b()))),
+            ]),
+        );
+        compare_block(
+            "{{{{}}}}",
+            block(vec![block(vec![block(vec![block(vec![])])])]),
+        );
+    }
+
+    #[test]
+    fn test_block_stmt_invalid() {
+        use utils::*;
+        let fails = [
+            "{",
+            "{return",
+            "{return;",
+            "{return a",
+            "{return a;",
+            "{return a+b",
+            "{return a+b;",
+            "{return; return",
+            "{return; return a",
+            "{return; return a;",
+            "{{}",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_block(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_if(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_if_stmt(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_if_stmt_success() {
+        use utils::*;
+        compare_if("if (a) b;", if_stmt(a(), exprstmt(b()), None));
+        compare_if(
+            "if (a) b; else c;",
+            if_stmt(a(), exprstmt(b()), Some(exprstmt(c()))),
+        );
+        compare_if(
+            "if (a) b; else if (c) d; else e;",
+            if_stmt(
+                a(),
+                exprstmt(b()),
+                Some(if_stmt(c(), exprstmt(d()), Some(exprstmt(e())))),
+            ),
+        );
+        compare_if("if (a) {}", if_stmt(a(), block(vec![]), None));
+        compare_if(
+            "if (a) {} else {}",
+            if_stmt(a(), block(vec![]), Some(block(vec![]))),
+        );
+        compare_if(
+            "if (a) {a;} else {a;}",
+            if_stmt(
+                a(),
+                block(vec![exprstmt(a())]),
+                Some(block(vec![exprstmt(a())])),
+            ),
+        );
+        compare_if("if(a)b;", if_stmt(a(), exprstmt(b()), None));
+        compare_if("if ( a ) b;", if_stmt(a(), exprstmt(b()), None));
+        compare_if("if (a)\n b;", if_stmt(a(), exprstmt(b()), None));
+        compare_if(
+            "if\n\n\n\n(\na\n\n)\n{\n\na;\n}\nelse\n{\nb;\n}",
+            if_stmt(
+                a(),
+                block(vec![exprstmt(a())]),
+                Some(block(vec![exprstmt(b())])),
+            ),
+        );
+        compare_if(
+            "if (a) if (b) c;",
+            if_stmt(a(), if_stmt(b(), exprstmt(c()), None), None),
+        );
+        compare_if(
+            "if (a) { if (b) c; else d; }",
+            if_stmt(
+                a(),
+                block(vec![if_stmt(b(), exprstmt(c()), Some(exprstmt(d())))]),
+                None,
+            ),
+        );
+        compare_if(
+            "if (a ? b : c++) d; else e++;",
+            if_stmt(
+                ternary(a(), b(), suffix_increment(c())),
+                exprstmt(d()),
+                Some(exprstmt(suffix_increment(e()))),
+            ),
+        );
+        compare_if(
+            "if (a) if (b) e; else c; else d;",
+            if_stmt(
+                a(),
+                if_stmt(b(), exprstmt(e()), Some(exprstmt(c()))),
+                Some(exprstmt(d())),
+            ),
+        )
+    }
+
+    #[test]
+    fn test_if_stmt_invalid() {
+        use utils::*;
+        let fails = [
+            "if a b;",
+            "if (a b;",
+            "if (a) b",
+            "if (a) else b;",
+            "if (a) b; else",
+            "if (a) b else c;",
+            "if (a) b; else if c d;",
+            "if (a) {a}",
+            "if (a)",
+            "if (a) else",
+            "if (a)) b;",
+            "if ((a) b;",
+            "if () b;",
+            "if (a) ; else;",
+            "if (a) { else b; }",
+            "if (a) {b;} else else {c;}",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_if_stmt(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_for(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_for_loop(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_for_loop_valid() {
+        use utils::*;
+        compare_for("for (;;) {}", for_loop(None, None, None, block(vec![])));
+        compare_for(
+            "for (;;) return;",
+            for_loop(None, None, None, return_stmt(None)),
+        );
+        compare_for(
+            "for (;;) for (;;) a;",
+            for_loop(None, None, None, for_loop(None, None, None, exprstmt(a()))),
+        );
+        compare_for(
+            "for (let i: int = 0; i < 10; i++) {}",
+            for_loop(
+                Some(variable_decl(ident("i"), get_type("int"), Some(num(0)))),
+                Some(lt(i(), num(10))),
+                Some(suffix_increment(i())),
+                block(vec![]),
+            ),
+        );
+        compare_for(
+            "for (let i: MyStruct = MyStruct {};;) a;",
+            for_loop(
+                Some(variable_decl(
+                    ident("i"),
+                    get_type("MyStruct"),
+                    Some(struct_init(ident("MyStruct"), vec![])),
+                )),
+                None,
+                None,
+                exprstmt(a()),
+            ),
+        );
+
+        compare_for(
+            "for (i = 5; i < 10; i += 2) { return i; }",
+            for_loop(
+                Some(exprstmt(assign(i(), num(5)))),
+                Some(lt(i(), num(10))),
+                Some(addeq(i(), num(2))),
+                block(vec![return_stmt(Some(i()))]),
+            ),
+        );
+        compare_for(
+            "for (;i != 10;) a = a + 1;",
+            for_loop(
+                None,
+                Some(noteq(i(), num(10))),
+                None,
+                exprstmt(assign(a(), add(a(), num(1)))),
+            ),
+        );
+        compare_for(
+            "for (;;i = i * 2) {}",
+            for_loop(
+                None,
+                None,
+                Some(assign(i(), mul(i(), num(2)))),
+                block(vec![]),
+            ),
+        );
+        compare_for(
+            "for (let i: int = 0;; i++) for (let a: int = 10; a > 0; a--) {}",
+            for_loop(
+                Some(variable_decl(ident("i"), get_type("int"), Some(num(0)))),
+                None,
+                Some(suffix_increment(i())),
+                for_loop(
+                    Some(variable_decl(ident("a"), get_type("int"), Some(num(10)))),
+                    Some(gt(a(), num(0))),
+                    Some(suffix_decrement(a())),
+                    block(vec![]),
+                ),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_for_loop_invalid() {
+        use utils::*;
+        let fails = [
+            "for );;) {}",
+            "for (let i: int = 0; i < 10 i++) {}",
+            "for (let i: int = 0 i < 10; i++) {}",
+            "for (i = 0; i < 10; i++)",
+            "for (let i: int = ; i < 10; i++) {}",
+            "for ({};;) {}",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_for_loop(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_vardecl(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = Stmt {
+            kind: bump().alloc(StmtKind::VariableDeclaration(
+                parser.parse_variable_decl(bump()).unwrap(),
+            )),
+            span: Span::empty(),
+        };
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_vardecl_valid() {
+        use utils::*;
+        compare_vardecl(
+            "let a: int",
+            variable_decl(ident("a"), get_type("int"), None),
+        );
+        compare_vardecl(
+            "let a: *int",
+            variable_decl(ident("a"), get_type("*int"), None),
+        );
+        compare_vardecl(
+            "let b: MyStruct",
+            variable_decl(ident("b"), get_type("MyStruct"), None),
+        );
+        compare_vardecl(
+            "let c: [int; 10]",
+            variable_decl(ident("c"), get_type("[int; 10]"), None),
+        );
+        compare_vardecl(
+            "let a: int = a",
+            variable_decl(ident("a"), get_type("int"), Some(a())),
+        );
+        compare_vardecl(
+            "let a: int = a ? b : c++ + d * e",
+            variable_decl(
+                ident("a"),
+                get_type("int"),
+                Some(ternary(a(), b(), add(suffix_increment(c()), mul(d(), e())))),
+            ),
+        );
+        compare_vardecl(
+            "let a: MyStruct = MyStruct { a: b, c: d}",
+            variable_decl(
+                ident("a"),
+                get_type("MyStruct"),
+                Some(struct_init(
+                    ident("MyStruct"),
+                    vec![(ident("a"), b()), (ident("c"), d())],
+                )),
+            ),
+        );
+        compare_vardecl(
+            "let a: [int; 5] = [b, c, d, e, f]",
+            variable_decl(
+                ident("a"),
+                get_type("[int; 5]"),
+                Some(array_init(vec![b(), c(), d(), e(), f()])),
+            ),
+        );
+        compare_vardecl(
+            "let a: *int = &b",
+            variable_decl(ident("a"), get_type("*int"), Some(addr_of(b()))),
+        );
+        compare_vardecl(
+            "let a: *void",
+            variable_decl(ident("a"), get_type("*void"), None),
+        );
+        compare_vardecl(
+            "let b: *void = nullptr",
+            variable_decl(ident("b"), get_type("*void"), Some(nullptr())),
+        );
+    }
+
+    #[test]
+    fn test_vardecl_invalid() {
+        use utils::*;
+        let fails = [
+            "let a int",
+            "let a: int=",
+            "let a: int = ",
+            "let a: = b",
+            "let : int = b",
+            "let a int = b",
+            "let a: struct MyStruct = struct MyStruct { a: b, c d}",
+            "let a: [int; 5] = [b, c, d e]",
+            "let a = 5",
+            "let c: [int] = [a, b, c]",
+            "let int: int",
+            "let a: void* = nullptr",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_variable_decl(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_funcdecl(s: &str, expected: FunctionDeclaration<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_function_decl(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_funcdecl_valid() {
+        use utils::*;
+        compare_funcdecl(
+            "fn f() {}",
+            func_decl(ident("f"), vec![], None, bblock(vec![])),
+        );
+        compare_funcdecl(
+            "fn f() -> int {}",
+            func_decl(ident("f"), vec![], Some(get_type("int")), bblock(vec![])),
+        );
+        compare_funcdecl(
+            "fn f() -> **int{}",
+            func_decl(ident("f"), vec![], Some(get_type("**int")), bblock(vec![])),
+        );
+        compare_funcdecl(
+            "fn f(a: int, b: *MyStruct) -> **MyStruct {}",
+            func_decl(
+                ident("f"),
+                vec![
+                    (ident("a"), get_type("int")),
+                    (ident("b"), get_type("*MyStruct")),
+                ],
+                Some(get_type("**MyStruct")),
+                bblock(vec![]),
+            ),
+        );
+        compare_funcdecl(
+            "fn g(a: *MyStruct, b: fn(int) -> int) -> fn(*Struct) -> **Struct { return; }",
+            func_decl(
+                ident("g"),
+                vec![
+                    (ident("a"), get_type("*MyStruct")),
+                    (ident("b"), get_type("fn(int) -> int")),
+                ],
+                Some(get_type("fn(*Struct) -> **Struct")),
+                bblock(vec![return_stmt(None)]),
+            ),
+        );
+    }
+
+    #[test]
+    fn test_funcdecl_invalid() {
+        use utils::*;
+        let fails = [
+            "fn f()",
+            "fn f() -> int",
+            "fn f(a: int, b: int)",
+            "fn f() return",
+            "fn f(int a) {}",
+            "fn f(a int) {}",
+            "fn f(a: int b: int) {}",
+            "fn f(a: int, b int) {}",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_function_decl(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_structdecl(s: &str, expected: StructDeclaration<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_struct_decl(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_structdecl_valid() {
+        use utils::*;
+        compare_structdecl("struct MyStruct {}", struct_decl(ident("MyStruct"), vec![]));
+        compare_structdecl(
+            "struct MyStruct {a: int}",
+            struct_decl(ident("MyStruct"), vec![(ident("a"), get_type("int"))]),
+        );
+        compare_structdecl(
+            "struct MyStruct {a: int,}",
+            struct_decl(ident("MyStruct"), vec![(ident("a"), get_type("int"))]),
+        );
+        compare_structdecl(
+            "struct MyStruct {b: OtherStruct, c: *OtherStruct}",
+            struct_decl(
+                ident("MyStruct"),
+                vec![
+                    (ident("b"), get_type("OtherStruct")),
+                    (ident("c"), get_type("*OtherStruct")),
+                ],
+            ),
+        );
+        compare_structdecl(
+            "struct MyStruct { b: *fn(int) -> int, c: [int; 10]}",
+            struct_decl(
+                ident("MyStruct"),
+                vec![
+                    (ident("b"), get_type("*fn(int) -> int")),
+                    (ident("c"), get_type("[int; 10]")),
+                ],
+            ),
+        );
+    }
+
+    #[test]
+    fn test_structdecl_invalid() {
+        use utils::*;
+        let fails = [
+            "struct MyStruct (",
+            "struct MyStruct [",
+            "struct MyStruct {",
+            "struct MyStruct { a: int b: int }",
+            "struct MyStruct { a: int, b int }",
+            "struct MyStruct { a: int, b: }",
+            "struct MyStruct { : int }",
+            "struct MyStruct {int a}",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_struct_decl(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_stmt(s: &str, expected: Stmt<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_stmt(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_stmt_parsing_valid() {
+        use utils::*;
+        compare_stmt("return a + b;", return_stmt(Some(add(a(), b()))));
+        compare_stmt("while (a) b;", while_loop(a(), exprstmt(b())));
+        compare_stmt("{return;}", block(vec![return_stmt(None)]));
+        compare_stmt(
+            "if (a) b; else c;",
+            if_stmt(a(), exprstmt(b()), Some(exprstmt(c()))),
+        );
+        compare_stmt(
+            "for (;;) return;",
+            for_loop(None, None, None, return_stmt(None)),
+        );
+        compare_stmt(
+            "let a: int = b + c;",
+            variable_decl(ident("a"), get_type("int"), Some(add(b(), c()))),
+        );
+        compare_stmt("continue;", continue_());
+        compare_stmt("break;", break_());
+        compare_stmt("a += 5;", exprstmt(addeq(a(), num(5))));
+    }
+
+    #[test]
+    fn test_stmt_invalid() {
+        use utils::*;
+        let fails = [
+            "return a + b",
+            "while (a) b",
+            "{return; ",
+            "if (a) b; else",
+            "for (;;) return",
+            "let a: int = b + c",
+            "continue",
+            "break",
+            "a += 5",
+            "for (let i: int = 0; i < 10; i++) something",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_stmt(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_global_decl(s: &str, expected: GlobalDeclaration<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let mut parser = Parser::new(&lexed);
+        let parsed = parser.parse_global_decl(bump()).unwrap();
+        assert!(parser.is_at_end());
+        assert!(parser.errors.is_empty());
+        assert_eq!(parsed, expected);
+    }
+
+    #[test]
+    fn test_global_decl() {
+        use utils::*;
+        compare_global_decl(
+            "fn f() {}",
+            GlobalDeclaration {
+                kind: GlobalDeclarationKind::Function(func_decl(
+                    ident("f"),
+                    vec![],
+                    None,
+                    bblock(vec![]),
+                )),
+                span: Span::empty(),
+            },
+        );
+        compare_global_decl(
+            "struct MyStruct { a: int, b: *int }",
+            GlobalDeclaration {
+                kind: GlobalDeclarationKind::Struct(struct_decl(
+                    ident("MyStruct"),
+                    vec![
+                        (ident("a"), get_type("int")),
+                        (ident("b"), get_type("*int")),
+                    ],
+                )),
+                span: Span::empty(),
+            },
+        );
+        compare_global_decl(
+            "let a: int = 5;",
+            GlobalDeclaration {
+                kind: GlobalDeclarationKind::Variable(VariableDeclaration {
+                    var_type: get_type("int"),
+                    name: ident("a"),
+                    init_value: Some(num(5)),
+                    span: Span::empty(),
+                }),
+                span: Span::empty(),
+            },
+        );
+    }
+
+    #[test]
+    fn test_global_decl_invalid() {
+        use utils::*;
+        let fails = ["fn f()", "fn f();", "let a: int = 5"];
+        for s in fails {
+            let lexed = lex(s);
+            let mut parser = Parser::new(&lexed);
+            assert!(
+                parser.parse_global_decl(bump()).is_err()
+                    || !parser.is_at_end()
+                    || !parser.errors.is_empty()
+            );
+        }
+    }
+
+    #[track_caller]
+    fn compare_program(s: &str, expected: Program<'_>) {
+        use utils::*;
+        let lexed = lex(s);
+        let parser = Parser::new(&lexed);
+        let parsed = parser.parse(bump());
+        assert!(!parsed.has_errors());
+        assert_eq!(parsed.program, expected);
+    }
+
+    #[test]
+    fn test_program_valid() {
+        use utils::*;
+        let func = func_decl(ident("func"), vec![], None, bblock(vec![]));
+        let struct_ = struct_decl(ident("MyStruct"), vec![(ident("a"), get_type("int"))]);
+        let var_decl = variable_decl(
+            ident("b"),
+            get_type("*int"),
+            Some(cast(num(5), get_type("*int"))),
+        );
+        let StmtKind::VariableDeclaration(var_decl) = var_decl.kind else {
+            unreachable!();
+        };
+        let mut v = BumpVec::new_in(bump());
+        v.push(GlobalDeclaration {
+            kind: GlobalDeclarationKind::Function(func),
+            span: Span::empty(),
+        });
+        v.push(GlobalDeclaration {
+            kind: GlobalDeclarationKind::Struct(struct_),
+            span: Span::empty(),
+        });
+        v.push(GlobalDeclaration {
+            kind: GlobalDeclarationKind::Variable(var_decl.clone()),
+            span: Span::empty(),
+        });
+        let program = Program { decls: v };
+        compare_program(
+            "fn func() {} struct MyStruct {a: int} let b: *int = 5 as *int;",
+            program,
+        );
+    }
+
+    #[test]
+    fn test_program_invalid() {
+        use utils::*;
+        let fails = [
+            "fn f() {}; let a;",
+            "struct MyStruct {a: int}; let a: int;",
+            "let a: int = 5 fn f() {}",
+            "let a: int = 5",
+            "struct MyStruct { a: int } fn f() {};",
+        ];
+        for s in fails {
+            let lexed = lex(s);
+            let parser = Parser::new(&lexed);
+            let parsed = parser.parse(bump());
+            assert!(parsed.has_errors());
         }
     }
 }
