@@ -1,9 +1,9 @@
 use bumpalo::Bump;
 use bumpalo::collections::Vec as BumpVec;
 
-use crate::ast::*;
-use crate::lexer::{KeywordKind, Token, TokenKind};
-use crate::span::Span;
+use crate::common::span::Span;
+use crate::syntax::ast::*;
+use crate::syntax::lexer::{KeywordKind, Token, TokenKind};
 
 type Result<T> = std::result::Result<T, ParsingError>;
 
@@ -46,6 +46,7 @@ pub struct Parser<'t> {
     tokens: &'t Vec<Token>,
     errors: Vec<ParsingError>,
     cursor: usize,
+    id: u64,
 }
 
 #[derive(Debug)]
@@ -61,14 +62,19 @@ impl ParseOutput<'_> {
 }
 
 impl<'t> Parser<'t> {
-    pub fn new(tokens: &'t Vec<Token>) -> Self {
+    pub fn parse<'a>(tokens: &'t Vec<Token>, bump: &'a Bump) -> ParseOutput<'a> {
+        let parser = Parser::new(tokens);
+        parser.parse_inner(bump)
+    }
+    fn new(tokens: &'t Vec<Token>) -> Self {
         Self {
             tokens,
             errors: Vec::new(),
             cursor: 0,
+            id: 0,
         }
     }
-    pub fn parse<'a>(mut self, bump: &'a Bump) -> ParseOutput<'a> {
+    fn parse_inner<'a>(mut self, bump: &'a Bump) -> ParseOutput<'a> {
         let mut decls = BumpVec::new_in(bump);
         while !self.is_at_end() {
             let decl = self.parse_global_decl(bump);
@@ -83,6 +89,9 @@ impl<'t> Parser<'t> {
                         break;
                     }
                 }
+            }
+            if let Ok(true) = self.match_token(TokenKind::Semicolon) {
+                self.advance();
             }
         }
         let program = Program { decls };
@@ -101,6 +110,7 @@ impl<'t> Parser<'t> {
                     | TokenKind::Keyword(KeywordKind::Fn)
                     | TokenKind::Keyword(KeywordKind::Let) = next.kind
                     {
+                        self.advance();
                         return Ok(());
                     }
                 }
@@ -109,6 +119,7 @@ impl<'t> Parser<'t> {
                     if let TokenKind::Keyword(KeywordKind::Struct)
                     | TokenKind::Keyword(KeywordKind::Fn) = next.kind
                     {
+                        self.advance();
                         return Ok(());
                     }
                 }
@@ -143,12 +154,14 @@ impl<'t> Parser<'t> {
             "Expected ')' at end of struct initialization",
         )?;
         let span = Span::new(ident.span.start, close_curly.span.end);
+        let id = self.next_id();
         let init = bump.alloc(ExprKind::StructInit(StructInit {
             name: ident,
             field_inits,
             span,
+            id,
         }));
-        Ok(Expr::new(init, span))
+        Ok(Expr::new(init, span, id))
     }
     fn parse_array_init<'a>(&mut self, bump: &'a Bump) -> Result<Expr<'a>> {
         let token = self.expect_or_ice(TokenKind::LSquare);
@@ -167,8 +180,9 @@ impl<'t> Parser<'t> {
             "Expected ']' at end of array initialization",
         )?;
         let span = Span::new(token.span.start, rsquare.span.end);
-        let init = bump.alloc(ExprKind::ArrayInit(ArrayInit { elements, span }));
-        Ok(Expr::new(init, span))
+        let id = self.next_id();
+        let init = bump.alloc(ExprKind::ArrayInit(ArrayInit { elements, span, id }));
+        Ok(Expr::new(init, span, id))
     }
     fn parse_global_decl<'a>(&mut self, bump: &'a Bump) -> Result<GlobalDeclaration<'a>> {
         let token = self.current()?;
@@ -176,17 +190,21 @@ impl<'t> Parser<'t> {
             TokenKind::Keyword(KeywordKind::Struct) => {
                 let decl = self.parse_struct_decl(bump)?;
                 let span = decl.span;
+                let id = decl.id;
                 Ok(GlobalDeclaration {
                     kind: GlobalDeclarationKind::Struct(decl),
                     span,
+                    id,
                 })
             }
             TokenKind::Keyword(KeywordKind::Fn) => {
                 let decl = self.parse_function_decl(bump)?;
                 let span = decl.span;
+                let id = decl.id;
                 Ok(GlobalDeclaration {
                     kind: GlobalDeclarationKind::Function(decl),
                     span,
+                    id,
                 })
             }
             TokenKind::Keyword(KeywordKind::Let) => {
@@ -201,9 +219,11 @@ impl<'t> Parser<'t> {
                     self.advance();
                 }
                 let span = decl.span;
+                let id = decl.id;
                 Ok(GlobalDeclaration {
                     kind: GlobalDeclarationKind::Variable(decl),
                     span,
+                    id,
                 })
             }
             _ => Err(ParsingError::ExpectedGlobalDecl { found: token }),
@@ -215,20 +235,23 @@ impl<'t> Parser<'t> {
             TokenKind::LCurly => {
                 let block = self.parse_block(bump)?;
                 let span = block.span;
+                let id = block.id;
                 let kind = bump.alloc(StmtKind::Block(block));
-                return Ok(Stmt { kind, span });
+                return Ok(Stmt { kind, span, id });
             }
             TokenKind::Keyword(KeywordKind::Continue) => {
                 self.advance();
                 let span = token.span;
-                let kind = bump.alloc(StmtKind::Continue(Continue { span }));
-                Stmt { kind, span }
+                let id = self.next_id();
+                let kind = bump.alloc(StmtKind::Continue(Continue { span, id }));
+                Stmt { kind, span, id }
             }
             TokenKind::Keyword(KeywordKind::Break) => {
                 self.advance();
                 let span = token.span;
-                let kind = bump.alloc(StmtKind::Break(Break { span }));
-                Stmt { kind, span }
+                let id = self.next_id();
+                let kind = bump.alloc(StmtKind::Break(Break { span, id }));
+                Stmt { kind, span, id }
             }
             TokenKind::Keyword(KeywordKind::Return) => return self.parse_return_stmt(bump),
             TokenKind::Keyword(KeywordKind::While) => return self.parse_while_loop(bump),
@@ -236,17 +259,19 @@ impl<'t> Parser<'t> {
             TokenKind::Keyword(KeywordKind::If) => return self.parse_if_stmt(bump),
             TokenKind::Keyword(KeywordKind::Let) => {
                 let decl = self.parse_variable_decl(bump)?;
-                let span = token.span;
+                let span = decl.span;
+                let id = decl.id;
                 let kind = bump.alloc(StmtKind::VariableDeclaration(decl));
-                Stmt { kind, span }
+                Stmt { kind, span, id }
             }
             #[cfg(test)]
             TokenKind::Keyword(KeywordKind::Assert) => self.parse_assert(bump)?,
             _ => {
                 let expr = self.parse_expr(bump)?;
                 let span = expr.span;
+                let id = expr.id;
                 let kind = bump.alloc(StmtKind::Expr(expr));
-                Stmt { kind, span }
+                Stmt { kind, span, id }
             }
         };
         if self.match_token(TokenKind::Semicolon)? {
@@ -285,8 +310,9 @@ impl<'t> Parser<'t> {
         match token.kind {
             TokenKind::Keyword(KeywordKind::Int) => {
                 self.advance();
-                let kind = bump.alloc(TypeKind::Int(IntType::I64));
-                Ok(Type::new(kind, token.span))
+                let kind = bump.alloc(TypeKind::Int);
+                let id = self.next_id();
+                Ok(Type::new(kind, token.span, id))
             }
             TokenKind::Keyword(KeywordKind::Fn) => {
                 self.advance();
@@ -320,35 +346,34 @@ impl<'t> Parser<'t> {
                     return_type,
                     param_types,
                 });
+                let id = self.next_id();
 
-                Ok(Type::new(kind, span))
+                Ok(Type::new(kind, span, id))
             }
             TokenKind::Keyword(KeywordKind::Void) => {
                 self.advance();
                 let kind = bump.alloc(TypeKind::Void);
-                Ok(Type::new(kind, token.span))
+                let id = self.next_id();
+                Ok(Type::new(kind, token.span, id))
             }
-            TokenKind::Asterisk => {
-                let mut count = 0;
-                while self.match_token(TokenKind::Asterisk)? {
-                    count += 1;
-                    self.advance();
+            TokenKind::Keyword(KeywordKind::NoAlias) => {
+                self.advance();
+                if !self.match_token(TokenKind::Asterisk)? {
+                    return Err(ParsingError::ExpectedOtherToken {
+                        expected: TokenKind::Asterisk,
+                        found: token,
+                        msg: "Expected pointer '*' after 'noalias'",
+                    });
                 }
-                let mut typ = self.parse_type(bump)?;
-                for i in 0..count {
-                    let end = typ.span.end;
-                    typ = Type::new(
-                        bump.alloc(TypeKind::Ptr { pointee: typ }),
-                        Span::new(token.span.start + i, end),
-                    );
-                }
-                Ok(typ)
+                self.parse_pointer(token, true, bump)
             }
+            TokenKind::Asterisk => self.parse_pointer(token, false, bump),
             TokenKind::Ident(_) => {
                 let ident = self.parse_ident(bump)?;
                 let span = ident.span;
+                let id = ident.id;
                 let kind = bump.alloc(TypeKind::Struct { name: ident });
-                Ok(Type::new(kind, span))
+                Ok(Type::new(kind, span, id))
             }
             TokenKind::LSquare => {
                 self.advance();
@@ -361,32 +386,69 @@ impl<'t> Parser<'t> {
                 let TokenKind::IntLiteral { value, minus } = token.kind else {
                     return Err(ParsingError::ExpectedArraySize { found: token });
                 };
-                if minus {
+                let size = if minus {
                     self.errors.push(ParsingError::NegativeArrayLen {
                         len_tok: token.clone(),
                     });
-                }
+                    1
+                } else if value > i64::MAX as u64 {
+                    self.errors.push(ParsingError::IntLiteralOutOfRange {
+                        found: token.clone(),
+                    });
+                    1
+                } else {
+                    value
+                } as i64;
+
                 self.advance();
                 let end_tok =
                     self.expect(TokenKind::RSquare, "Expected ']' at end of array type")?;
-                let kind = bump.alloc(TypeKind::Array {
-                    element_type,
-                    size: value,
-                });
+                let kind = bump.alloc(TypeKind::Array { element_type, size });
+                let id = self.next_id();
 
                 Ok(Type::new(
                     kind,
                     Span::new(token.span.start, end_tok.span.end),
+                    id,
                 ))
             }
             TokenKind::Comma | TokenKind::Equal | TokenKind::Semicolon | TokenKind::RParen => {
                 self.errors
                     .push(ParsingError::ExpectedType { found: token });
                 let alloced = bump.alloc(TypeKind::Error);
-                Ok(Type::new(alloced, Span::empty()))
+                let id = self.next_id();
+                Ok(Type::new(alloced, Span::empty(), id))
             }
             _ => Err(ParsingError::ExpectedType { found: token }),
         }
+    }
+
+    fn parse_pointer<'a>(
+        &mut self,
+        token: Token,
+        noalias: bool,
+        bump: &'a Bump,
+    ) -> Result<Type<'a>> {
+        let mut count = 0;
+        while self.match_token(TokenKind::Asterisk)? {
+            count += 1;
+            self.advance();
+        }
+        let mut typ = self.parse_type(bump)?;
+        for i in 0..count {
+            let is_last = i == count - 1;
+            let end = typ.span.end;
+            let id = self.next_id();
+            typ = Type::new(
+                bump.alloc(TypeKind::Ptr {
+                    pointee: typ,
+                    noalias: if is_last { noalias } else { false },
+                }),
+                Span::new(token.span.start + i, end),
+                id,
+            );
+        }
+        Ok(typ)
     }
     #[cfg(test)]
     fn parse_assert<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
@@ -396,11 +458,13 @@ impl<'t> Parser<'t> {
         let expr = self.parse_expr(bump)?;
         let rparen = self.expect(TokenKind::RParen, "Expected ')' after assert expression")?;
         let span = Span::new(token.span.start, rparen.span.end);
+        let id = self.next_id();
         let kind = bump.alloc(StmtKind::Assert(Assert {
             condition: expr,
             span,
+            id,
         }));
-        Ok(Stmt { kind, span })
+        Ok(Stmt { kind, span, id })
     }
     fn parse_ident_type_pair<'a>(&mut self, bump: &'a Bump) -> Result<(Ident<'a>, Type<'a>)> {
         let ident = self.parse_ident(bump)?;
@@ -428,11 +492,13 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        let id = self.next_id();
         Ok(VariableDeclaration {
             var_type: typ,
             name,
             init_value,
             span,
+            id,
         })
     }
     fn parse_function_decl<'a>(&mut self, bump: &'a Bump) -> Result<FunctionDeclaration<'a>> {
@@ -466,12 +532,14 @@ impl<'t> Parser<'t> {
         };
         let body = self.parse_block(bump)?;
         let span = Span::new(fn_kw.span.start, body.span.end);
+        let id = self.next_id();
         Ok(FunctionDeclaration {
             return_type: ret_type,
             name,
             params,
             body,
             span,
+            id,
         })
     }
     fn parse_struct_decl<'a>(&mut self, bump: &'a Bump) -> Result<StructDeclaration<'a>> {
@@ -493,10 +561,12 @@ impl<'t> Parser<'t> {
             "Expected '}' at end of struct declaration",
         )?;
         let span = Span::new(struct_kw.span.start, rcurly.span.end);
+        let id = self.next_id();
         Ok(StructDeclaration {
             name,
             fields: members,
             span,
+            id,
         })
     }
     fn parse_block<'a>(&mut self, bump: &'a Bump) -> Result<Block<'a>> {
@@ -513,9 +583,11 @@ impl<'t> Parser<'t> {
         }
         let end = self.expect(TokenKind::RCurly, "Expected '}' at end of block")?;
         let span = Span::new(lcurly.span.start, end.span.end);
+        let id = self.next_id();
         Ok(Block {
             body: statements,
             span,
+            id,
         })
     }
     fn parse_if_stmt<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
@@ -533,13 +605,15 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        let id = self.next_id();
         let kind = bump.alloc(StmtKind::IfStmt(IfStmt {
             condition,
             then_branch,
             else_branch,
             span,
+            id,
         }));
-        Ok(Stmt { kind, span })
+        Ok(Stmt { kind, span, id })
     }
     fn parse_while_loop<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
         let while_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::While));
@@ -548,12 +622,14 @@ impl<'t> Parser<'t> {
         self.expect(TokenKind::RParen, "Expected ')' after while loop condition")?;
         let body = self.parse_stmt(bump)?;
         let span = Span::new(while_kw.span.start, body.span.end);
+        let id = self.next_id();
         let kind = bump.alloc(StmtKind::WhileLoop(WhileLoop {
             condition,
             body,
             span,
+            id,
         }));
-        Ok(Stmt { kind, span })
+        Ok(Stmt { kind, span, id })
     }
     fn parse_for_loop<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
         let for_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::For));
@@ -563,15 +639,17 @@ impl<'t> Parser<'t> {
             TokenKind::Keyword(KeywordKind::Let) => {
                 let vardecl = self.parse_variable_decl(bump)?;
                 let span = vardecl.span;
+                let id = vardecl.id;
                 let kind = bump.alloc(StmtKind::VariableDeclaration(vardecl));
-                Some(Stmt { kind, span })
+                Some(Stmt { kind, span, id })
             }
             TokenKind::Semicolon => None,
             _ => {
                 let expr = self.parse_expr(bump)?;
                 let span = expr.span;
+                let id = expr.id;
                 let kind = bump.alloc(StmtKind::Expr(expr));
-                Some(Stmt { kind, span })
+                Some(Stmt { kind, span, id })
             }
         };
         self.expect(TokenKind::Semicolon, "Expected ';' after loop initializer")?;
@@ -587,37 +665,48 @@ impl<'t> Parser<'t> {
         self.expect(TokenKind::RParen, "Expected ')' after for loop increment")?;
         let body = self.parse_stmt(bump)?;
         let span = Span::new(for_kw.span.start, body.span.end);
+        let id = self.next_id();
         let kind = bump.alloc(StmtKind::ForLoop(ForLoop {
             init,
             condition,
             post,
             body,
             span,
+            id,
         }));
-        Ok(Stmt { kind, span })
+        Ok(Stmt { kind, span, id })
     }
     fn parse_return_stmt<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
         let return_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Return));
         if self.match_token(TokenKind::Semicolon)? {
             self.advance();
+            let id = self.next_id();
             let stmt = bump.alloc(StmtKind::ReturnStmt(ReturnStmt {
                 value: None,
                 span: return_kw.span,
+                id,
             }));
             return Ok(Stmt {
                 kind: stmt,
                 span: return_kw.span,
+                id,
             });
         }
         let value = self.parse_expr(bump)?;
         self.expect(TokenKind::Semicolon, "Expected ';' after return stmt")?;
         let span = Span::new(return_kw.span.start, value.span.end);
 
+        let id = self.next_id();
         let stmt = bump.alloc(StmtKind::ReturnStmt(ReturnStmt {
             value: Some(value),
             span,
+            id,
         }));
-        Ok(Stmt { kind: stmt, span })
+        Ok(Stmt {
+            kind: stmt,
+            span,
+            id,
+        })
     }
     fn parse_ident<'a>(&mut self, bump: &'a Bump) -> Result<Ident<'a>> {
         let token = self.current()?;
@@ -626,9 +715,11 @@ impl<'t> Parser<'t> {
         };
         self.advance();
         let s = bump.alloc_str(&id);
+        let id = self.next_id();
         Ok(Ident {
             ident: s,
             span: token.span,
+            id,
         })
     }
 }
@@ -672,13 +763,15 @@ impl<'t> Parser<'t> {
                     let false_branch = self.expr_bp(r_bp, bump)?;
                     let condition = lhs;
                     let span = Span::new(condition.span.start, false_branch.span.end);
+                    let id = self.next_id();
                     let kind = bump.alloc(ExprKind::Ternary(Ternary {
                         condition,
                         true_branch,
                         false_branch,
                         span,
+                        id,
                     }));
-                    lhs = Expr::new(kind, span);
+                    lhs = Expr::new(kind, span, id);
                     continue;
                 }
                 let rhs = self.expr_bp(r_bp, bump)?;
@@ -698,13 +791,18 @@ impl<'t> Parser<'t> {
                 let typ = self.parse_type(bump)?;
                 let end_tok = self.expect(TokenKind::RParen, "Expected ')' after sizeof type")?;
                 let span = Span::new(token.span.start, end_tok.span.end);
-                let kind = bump.alloc(ExprKind::SizeOfType(SizeOfType { typ, span }));
-                Ok(Some(Expr::new(kind, span)))
+                let id = self.next_id();
+                let kind = bump.alloc(ExprKind::SizeOfType(SizeOfType { typ, span, id }));
+                Ok(Some(Expr::new(kind, span, id)))
             }
             TokenKind::Keyword(KeywordKind::Nullptr) => {
                 self.advance();
-                let kind = bump.alloc(ExprKind::Nullptr(Nullptr));
-                Ok(Some(Expr::new(kind, token.span)))
+                let id = self.next_id();
+                let kind = bump.alloc(ExprKind::Nullptr(Nullptr {
+                    span: token.span,
+                    id,
+                }));
+                Ok(Some(Expr::new(kind, token.span, id)))
             }
             TokenKind::LParen => {
                 self.advance();
@@ -725,14 +823,13 @@ impl<'t> Parser<'t> {
                         0
                     }
                 };
+                let id = self.next_id();
                 let kind = bump.alloc(ExprKind::Int(Int {
-                    lit: IntLiteral {
-                        kind: IntLiteralKind::I64(value),
-                        span,
-                    },
+                    lit: value,
                     span,
+                    id,
                 }));
-                Ok(Some(Expr::new(kind, span)))
+                Ok(Some(Expr::new(kind, span, id)))
             }
             TokenKind::Ident(s) => {
                 if let Ok(Token {
@@ -744,11 +841,13 @@ impl<'t> Parser<'t> {
                 } else {
                     self.advance();
                     let s = bump.alloc_str(&s);
+                    let id = self.next_id();
                     let kind = bump.alloc(ExprKind::Ident(Ident {
                         ident: s,
                         span: token.span,
+                        id,
                     }));
-                    Ok(Some(Expr::new(kind, token.span)))
+                    Ok(Some(Expr::new(kind, token.span, id)))
                 }
             }
             _ => Ok(None),
@@ -768,8 +867,14 @@ impl<'t> Parser<'t> {
             _ => unreachable!(),
         };
         let span = Span::new(op.span.start, expr.span.end);
-        let kind = bump.alloc(ExprKind::PrefixOp(PrefixOp { kind, expr, span }));
-        Ok(Expr::new(kind, span))
+        let id = self.next_id();
+        let kind = bump.alloc(ExprKind::PrefixOp(PrefixOp {
+            kind,
+            expr,
+            span,
+            id,
+        }));
+        Ok(Expr::new(kind, span, id))
     }
     fn handle_infix<'a>(
         &mut self,
@@ -807,13 +912,15 @@ impl<'t> Parser<'t> {
             _ => unreachable!(),
         };
         let span = Span::new(lhs.span.start, rhs.span.end);
+        let id = self.next_id();
         let exprkind = bump.alloc(ExprKind::BinaryOp(BinaryOp {
             kind: binop_kind,
             left: lhs,
             right: rhs,
             span,
+            id,
         }));
-        Ok(Expr::new(exprkind, span))
+        Ok(Expr::new(exprkind, span, id))
     }
     fn handle_postfix<'a>(
         &mut self,
@@ -835,12 +942,14 @@ impl<'t> Parser<'t> {
                 }
                 let rparen = self.expect(TokenKind::RParen, "Expected ')' after argument list")?;
                 let span = Span::new(expr.span.start, rparen.span.end);
+                let id = self.next_id();
                 let kind = bump.alloc(ExprKind::FunctionCall(FunctionCall {
                     func_expr: expr,
                     args,
                     span,
+                    id,
                 }));
-                Ok(Expr::new(kind, span))
+                Ok(Expr::new(kind, span, id))
             }
             TokenKind::LSquare => {
                 let index = self.parse_expr(bump)?;
@@ -849,35 +958,42 @@ impl<'t> Parser<'t> {
                     "Expected ']' after array index expression",
                 )?;
                 let span = Span::new(expr.span.start, rsquare.span.end);
+                let id = self.next_id();
                 let kind = bump.alloc(ExprKind::ArrayIndex(ArrayIndex {
                     array: expr,
                     index,
                     span,
+                    id,
                 }));
-                Ok(Expr::new(kind, span))
+                Ok(Expr::new(kind, span, id))
             }
             TokenKind::Period => {
                 let ident = self.parse_ident(bump)?;
                 let span = Span::new(expr.span.start, ident.span.end);
+                let id = self.next_id();
                 let kind = bump.alloc(ExprKind::MemberAccess(MemberAccess {
                     struct_expr: expr,
                     member_name: ident,
                     span,
+                    id,
                 }));
-                Ok(Expr::new(kind, span))
+                Ok(Expr::new(kind, span, id))
             }
             TokenKind::Arrow => {
                 let ident = self.parse_ident(bump)?;
                 let span = Span::new(expr.span.start, ident.span.end);
+                let id = self.next_id();
                 let kind = bump.alloc(ExprKind::PointerMemberAccess(PointerMemberAccess {
                     struct_ptr_expr: expr,
                     member_name: ident,
                     span,
+                    id,
                 }));
-                Ok(Expr::new(kind, span))
+                Ok(Expr::new(kind, span, id))
             }
             TokenKind::DoublePlus | TokenKind::DoubleMinus => {
                 let span = Span::new(expr.span.start, op.span.end);
+                let id = self.next_id();
                 let kind = bump.alloc(ExprKind::PostfixOp(PostfixOp {
                     kind: if op.kind == TokenKind::DoublePlus {
                         PostfixOpKind::Increment
@@ -886,14 +1002,21 @@ impl<'t> Parser<'t> {
                     },
                     expr,
                     span,
+                    id,
                 }));
-                Ok(Expr::new(kind, span))
+                Ok(Expr::new(kind, span, id))
             }
             TokenKind::Keyword(KeywordKind::As) => {
                 let typ = self.parse_type(bump)?;
                 let span = Span::new(expr.span.start, typ.span.end);
-                let kind = bump.alloc(ExprKind::Cast(Cast { to_type: typ, expr }));
-                Ok(Expr::new(kind, span))
+                let id = self.next_id();
+                let kind = bump.alloc(ExprKind::Cast(Cast {
+                    to_type: typ,
+                    expr,
+                    span,
+                    id,
+                }));
+                Ok(Expr::new(kind, span, id))
             }
             _ => unreachable!(),
         }
@@ -950,6 +1073,11 @@ fn postfix_binding_power(token: &TokenKind) -> Option<(u8, ())> {
 }
 
 impl<'t> Parser<'t> {
+    fn next_id(&mut self) -> NodeId {
+        let id = NodeId(self.id);
+        self.id += 1;
+        id
+    }
     fn is_at_end(&self) -> bool {
         self.cursor >= self.tokens.len()
     }
@@ -1002,7 +1130,7 @@ impl<'t> Parser<'t> {
 #[cfg(test)]
 mod tests {
 
-    use crate::lexer::Lexer;
+    use crate::syntax::lexer::Lexer;
 
     use super::*;
     #[macro_use]
@@ -1011,8 +1139,7 @@ mod tests {
 
         use super::*;
         pub fn lex(s: &str) -> Vec<Token> {
-            let lexer = Lexer::new(s);
-            let lexed = lexer.lex();
+            let lexed = Lexer::lex(s);
             assert!(!lexed.has_errors());
             lexed.tokens
         }
@@ -1027,67 +1154,118 @@ mod tests {
         pub fn num(n: i64) -> Expr<'static> {
             Expr::new(
                 bump().alloc(ExprKind::Int(Int {
-                    lit: IntLiteral {
-                        kind: IntLiteralKind::I64(n),
-                        span: Span::empty(),
-                    },
+                    lit: n,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn a() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("a"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("a"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn b() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("b"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("b"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn c() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("c"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("c"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn d() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("d"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("d"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn e() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("e"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("e"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn f() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("f"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("f"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn g() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("g"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("g"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn i() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Ident(ident("i"))), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Ident(ident("i"))),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn ident(s: &str) -> Ident<'_> {
             Ident {
                 ident: s,
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn ptr(pointee: Type<'static>) -> Type<'static> {
-            Type::new(bump().alloc(TypeKind::Ptr { pointee }), Span::empty())
+            Type::new(
+                bump().alloc(TypeKind::Ptr {
+                    pointee,
+                    noalias: false,
+                }),
+                Span::empty(),
+                NodeId(0),
+            )
+        }
+        pub fn noalias_ptr(pointee: Type<'static>) -> Type<'static> {
+            Type::new(
+                bump().alloc(TypeKind::Ptr {
+                    pointee,
+                    noalias: true,
+                }),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn void() -> Type<'static> {
-            Type::new(&TypeKind::Void, Span::empty())
+            Type::new(&TypeKind::Void, Span::empty(), NodeId(0))
         }
         pub fn int() -> Type<'static> {
-            Type::new(&TypeKind::Int(IntType::I64), Span::empty())
+            Type::new(&TypeKind::Int, Span::empty(), NodeId(0))
         }
         pub fn struct_(s: &'static str) -> Type<'static> {
             Type::new(
                 bump().alloc(TypeKind::Struct { name: ident(s) }),
                 Span::empty(),
+                NodeId(0),
             )
         }
-        pub fn array(t: Type<'static>, len: u64) -> Type<'static> {
+        pub fn array(t: Type<'static>, len: i64) -> Type<'static> {
             Type::new(
                 bump().alloc(TypeKind::Array {
                     element_type: t,
                     size: len,
                 }),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn func_ptr(
@@ -1104,6 +1282,7 @@ mod tests {
                     param_types: v,
                 }),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn cast(from: Expr<'static>, to: Type<'static>) -> Expr<'static> {
@@ -1111,8 +1290,11 @@ mod tests {
                 bump().alloc(ExprKind::Cast(Cast {
                     to_type: to,
                     expr: from,
+                    span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn binop(
@@ -1126,8 +1308,10 @@ mod tests {
                     left: lhs,
                     right: rhs,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn prefix_op(expr: Expr<'static>, op_type: PrefixOpKind) -> Expr<'static> {
@@ -1136,8 +1320,10 @@ mod tests {
                     kind: op_type,
                     expr,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn postfix_op(expr: Expr<'static>, op_type: PostfixOpKind) -> Expr<'static> {
@@ -1146,8 +1332,10 @@ mod tests {
                     kind: op_type,
                     expr,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn ternary(
@@ -1161,8 +1349,10 @@ mod tests {
                     true_branch,
                     false_branch,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn func_call(func_expr: Expr<'static>, args: Vec<Expr<'static>>) -> Expr<'static> {
@@ -1171,8 +1361,10 @@ mod tests {
                     func_expr,
                     args: args.into_iter().collect_in(bump()),
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn member_access(expr: Expr<'static>, member: &'static str) -> Expr<'static> {
@@ -1181,8 +1373,10 @@ mod tests {
                     struct_expr: expr,
                     member_name: ident(member),
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn pointer_member_access(expr: Expr<'static>, member: &'static str) -> Expr<'static> {
@@ -1191,8 +1385,10 @@ mod tests {
                     struct_ptr_expr: expr,
                     member_name: ident(member),
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn array_index(expr: Expr<'static>, index: Expr<'static>) -> Expr<'static> {
@@ -1201,8 +1397,10 @@ mod tests {
                     array: expr,
                     index,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn sizeof(typ: Type<'static>) -> Expr<'static> {
@@ -1210,12 +1408,21 @@ mod tests {
                 bump().alloc(ExprKind::SizeOfType(SizeOfType {
                     typ,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn nullptr() -> Expr<'static> {
-            Expr::new(bump().alloc(ExprKind::Nullptr(Nullptr)), Span::empty())
+            Expr::new(
+                bump().alloc(ExprKind::Nullptr(Nullptr {
+                    span: Span::empty(),
+                    id: NodeId(0),
+                })),
+                Span::empty(),
+                NodeId(0),
+            )
         }
         pub fn get_type(s: &str) -> Type<'static> {
             let tokens = lex(s);
@@ -1340,8 +1547,10 @@ mod tests {
                     name,
                     field_inits: inits.into_iter().collect_in(bump()),
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn array_init(exprs: Vec<Expr<'static>>) -> Expr<'static> {
@@ -1349,8 +1558,10 @@ mod tests {
                 bump().alloc(ExprKind::ArrayInit(ArrayInit {
                     elements: exprs.into_iter().collect_in(bump()),
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 Span::empty(),
+                NodeId(0),
             )
         }
         pub fn return_stmt(r: Option<Expr<'static>>) -> Stmt<'static> {
@@ -1358,8 +1569,10 @@ mod tests {
                 kind: bump().alloc(StmtKind::ReturnStmt(ReturnStmt {
                     value: r,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn block(stmts: Vec<Stmt<'static>>) -> Stmt<'static> {
@@ -1367,30 +1580,37 @@ mod tests {
                 kind: bump().alloc(StmtKind::Block(Block {
                     body: stmts.into_iter().collect_in(bump()),
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn bblock(stmts: Vec<Stmt<'static>>) -> Block<'static> {
             Block {
                 body: stmts.into_iter().collect_in(bump()),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn break_() -> Stmt<'static> {
             Stmt {
                 kind: bump().alloc(StmtKind::Break(Break {
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn continue_() -> Stmt<'static> {
             Stmt {
                 kind: bump().alloc(StmtKind::Continue(Continue {
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn if_stmt(
@@ -1404,8 +1624,10 @@ mod tests {
                     then_branch,
                     else_branch,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn while_loop(condition: Expr<'static>, body: Stmt<'static>) -> Stmt<'static> {
@@ -1414,8 +1636,10 @@ mod tests {
                     condition,
                     body,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn for_loop(
@@ -1431,14 +1655,17 @@ mod tests {
                     post,
                     body,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn exprstmt(expr: Expr<'static>) -> Stmt<'static> {
             Stmt {
                 kind: bump().alloc(StmtKind::Expr(expr)),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn variable_decl(
@@ -1452,8 +1679,10 @@ mod tests {
                     name,
                     init_value: init,
                     span: Span::empty(),
+                    id: NodeId(0),
                 })),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn func_decl(
@@ -1469,6 +1698,7 @@ mod tests {
                 params: params.into_iter().collect_in(bump()),
                 body,
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
         pub fn struct_decl(
@@ -1480,6 +1710,7 @@ mod tests {
                 name,
                 fields: fields.into_iter().collect_in(bump()),
                 span: Span::empty(),
+                id: NodeId(0),
             }
         }
     }
@@ -1491,15 +1722,7 @@ mod tests {
             let lexed = lex(s);
             let mut parser = Parser::new(&lexed);
             let atom = parser.parse_atom(bump()).unwrap().unwrap();
-            let ExprKind::Int(Int {
-                lit:
-                    IntLiteral {
-                        kind: IntLiteralKind::I64(parsed),
-                        ..
-                    },
-                ..
-            }) = atom.kind
-            else {
+            let ExprKind::Int(Int { lit: parsed, .. }) = atom.kind else {
                 unreachable!();
             };
             assert_eq!(*parsed, expected)
@@ -1518,6 +1741,7 @@ mod tests {
         assert_fail("9223372036854775808");
     }
 
+    #[track_caller]
     fn compare_types(s: &str, expected: Type<'_>) {
         use utils::*;
         let tokens = lex(s);
@@ -1554,6 +1778,15 @@ mod tests {
         compare_types("fn()", func_ptr(Vec::new(), None));
         compare_types("*fn()", ptr(func_ptr(Vec::new(), None)));
         compare_types("fn(int)", func_ptr(vec![int()], None));
+        compare_types("noalias *int", noalias_ptr(int()));
+        compare_types("noalias * noalias *int", noalias_ptr(noalias_ptr(int())));
+        compare_types("noalias *void", noalias_ptr(void()));
+        compare_types("noalias *SomeStruct", noalias_ptr(struct_("SomeStruct")));
+        compare_types("noalias *[int; 255]", noalias_ptr(array(int(), 255)));
+        dbg!(noalias_ptr(ptr(int())));
+        compare_types("noalias **int", noalias_ptr(ptr(int())));
+        compare_types("* noalias *int", ptr(noalias_ptr(int())));
+
         compare_types(
             "fn(int, int) -> int",
             func_ptr(vec![int(), int()], Some(int())),
@@ -2254,6 +2487,7 @@ mod tests {
         let parsed = Stmt {
             kind: bump().alloc(StmtKind::Block(parser.parse_block(bump()).unwrap())),
             span: Span::empty(),
+            id: NodeId(0),
         };
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
@@ -2549,6 +2783,7 @@ mod tests {
                 parser.parse_variable_decl(bump()).unwrap(),
             )),
             span: Span::empty(),
+            id: NodeId(0),
         };
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
@@ -2876,6 +3111,7 @@ mod tests {
                     bblock(vec![]),
                 )),
                 span: Span::empty(),
+                id: NodeId(0),
             },
         );
         compare_global_decl(
@@ -2889,6 +3125,7 @@ mod tests {
                     ],
                 )),
                 span: Span::empty(),
+                id: NodeId(0),
             },
         );
         compare_global_decl(
@@ -2899,8 +3136,10 @@ mod tests {
                     name: ident("a"),
                     init_value: Some(num(5)),
                     span: Span::empty(),
+                    id: NodeId(0),
                 }),
                 span: Span::empty(),
+                id: NodeId(0),
             },
         );
     }
@@ -2924,8 +3163,7 @@ mod tests {
     fn compare_program(s: &str, expected: Program<'_>) {
         use utils::*;
         let lexed = lex(s);
-        let parser = Parser::new(&lexed);
-        let parsed = parser.parse(bump());
+        let parsed = Parser::parse(&lexed, bump());
         assert!(!parsed.has_errors());
         assert_eq!(parsed.program, expected);
     }
@@ -2947,14 +3185,17 @@ mod tests {
         v.push(GlobalDeclaration {
             kind: GlobalDeclarationKind::Function(func),
             span: Span::empty(),
+            id: NodeId(0),
         });
         v.push(GlobalDeclaration {
             kind: GlobalDeclarationKind::Struct(struct_),
             span: Span::empty(),
+            id: NodeId(0),
         });
         v.push(GlobalDeclaration {
             kind: GlobalDeclarationKind::Variable(var_decl.clone()),
             span: Span::empty(),
+            id: NodeId(0),
         });
         let program = Program { decls: v };
         compare_program(
@@ -2968,15 +3209,12 @@ mod tests {
         use utils::*;
         let fails = [
             "fn f() {}; let a;",
-            "struct MyStruct {a: int}; let a: int;",
             "let a: int = 5 fn f() {}",
             "let a: int = 5",
-            "struct MyStruct { a: int } fn f() {};",
         ];
         for s in fails {
             let lexed = lex(s);
-            let parser = Parser::new(&lexed);
-            let parsed = parser.parse(bump());
+            let parsed = Parser::parse(&lexed, bump());
             assert!(parsed.has_errors());
         }
     }

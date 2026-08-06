@@ -2,7 +2,7 @@ use std::{iter::Peekable, num::IntErrorKind, str::CharIndices};
 
 use smol_str::SmolStr;
 
-use crate::span::Span;
+use crate::common::span::Span;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeywordKind {
@@ -21,6 +21,8 @@ pub enum KeywordKind {
     Continue,
     Void,
     Let,
+    NoAlias,
+
     #[cfg(test)]
     Assert,
 }
@@ -140,7 +142,11 @@ impl CharType {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn new(input: &'a str) -> Self {
+    pub fn lex(s: &str) -> LexingOutput {
+        let lexer = Lexer::new(s);
+        lexer.lex_inner()
+    }
+    fn new(input: &'a str) -> Self {
         assert!(input.len() <= 4_000_000_000);
         Self {
             tokens: Vec::new(),
@@ -180,6 +186,7 @@ impl<'a> Lexer<'a> {
             "continue" => TokenKind::Keyword(KeywordKind::Continue),
             "void" => TokenKind::Keyword(KeywordKind::Void),
             "let" => TokenKind::Keyword(KeywordKind::Let),
+            "noalias" => TokenKind::Keyword(KeywordKind::NoAlias),
             _ => TokenKind::Ident(SmolStr::new(s)),
         };
         self.tokens.push(Token { kind, span });
@@ -374,7 +381,7 @@ impl<'a> Lexer<'a> {
             span: Span::new(start, start + 1),
         })
     }
-    pub fn lex(mut self) -> LexingOutput {
+    fn lex_inner(mut self) -> LexingOutput {
         while let Some((index, curr)) = self.iter.next() {
             if curr == '/'
                 && let Some((_index, next)) = self.iter.peek()
@@ -425,8 +432,7 @@ impl<'a> Lexer<'a> {
 fn test_lexer() {
     #[track_caller]
     fn test(s: &str, expect: TokenKind) {
-        let lexer = Lexer::new(s);
-        let output = lexer.lex();
+        let output = Lexer::lex(s);
         assert!(!output.has_errors());
         assert_eq!(output.tokens.len(), 1);
         assert_eq!(output.tokens[0].kind, expect);
