@@ -6,7 +6,6 @@ edition = "2024"
 [dependencies]
 ahash = "0.8.12"
 ariadne = "0.6.0"
-bumpalo = { version = "3.20.3", features = ["boxed", "collections"] }
 clap = { version = "4.6.4", features = ["derive"] }
 indexmap = "2.14.0"
 itertools = "0.15.0"

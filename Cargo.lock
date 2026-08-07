@@ -86,12 +86,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "bumpalo"
-version = "3.20.3"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f5acc6cb2ba439de613abc23857ec3d78374d8ed5ac84e9d11336e87da8649"
-
-[[package]]
 name = "bytes"
 version = "1.12.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -433,7 +427,6 @@ version = "0.1.0"
 dependencies = [
  "ahash",
  "ariadne",
- "bumpalo",
  "clap",
  "indexmap",
  "itertools",

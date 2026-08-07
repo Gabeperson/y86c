@@ -1,9 +1,9 @@
 use ahash::AHashMap;
-use smol_str::SmolStr;
 
 use crate::common::span::Span;
 use crate::syntax::ast::visitor::*;
 use crate::syntax::ast::*;
+use crate::syntax::context::{Context, Symbol};
 
 #[derive(Debug)]
 pub struct ASTValidator {
@@ -11,12 +11,12 @@ pub struct ASTValidator {
     no_main: bool,
     found_main: bool,
     pub errors: Vec<ASTValidationError>,
-    global_var_scope: AHashMap<SmolStr, Span>,
-    struct_scope: AHashMap<SmolStr, Span>,
+    global_var_scope: AHashMap<Symbol, Span>,
+    struct_scope: AHashMap<Symbol, Span>,
 }
 
 impl ASTValidator {
-    pub fn validate(ast: &Program<'_>, no_main: bool) -> Vec<ASTValidationError> {
+    pub fn validate(ast: &Program, no_main: bool, ctx: &Context) -> Vec<ASTValidationError> {
         let mut validator = ASTValidator {
             loop_depth: 0,
             no_main,
@@ -25,7 +25,7 @@ impl ASTValidator {
             global_var_scope: AHashMap::new(),
             struct_scope: AHashMap::new(),
         };
-        validator.visit_program(ast);
+        validator.visit_program(ast, ctx);
         validator.errors
     }
 }
@@ -45,21 +45,21 @@ pub enum ASTValidationError {
         typ: Span,
     },
     DuplicateParameterName {
-        name: SmolStr,
+        name: Symbol,
         param1: Span,
         param2: Span,
     },
     StructWithNoField {
-        name: SmolStr,
+        name: Symbol,
         decl: Span,
     },
     DuplicateStructFieldDeclared {
-        name: SmolStr,
+        name: Symbol,
         field1: Span,
         field2: Span,
     },
     DuplicateStructFieldInit {
-        name: SmolStr,
+        name: Symbol,
         field1: Span,
         field2: Span,
     },
@@ -71,13 +71,13 @@ pub enum ASTValidationError {
     },
     NoMain,
     DuplicateGlobalSymbol {
-        symbol: SmolStr,
+        symbol: Symbol,
         symbol_type: GlobalSymbolType,
         prev_def: Span,
         new_def: Span,
     },
     DuplicateStructDecl {
-        name: SmolStr,
+        name: Symbol,
         prev_def: Span,
         new_def: Span,
     },
@@ -90,119 +90,131 @@ pub enum ASTValidationError {
 }
 
 impl AstVisitor for ASTValidator {
-    fn visit_type(&mut self, typ: &TypeNode<'_>) {
-        self.visit_type_impl(typ, false, false)
+    fn visit_type(&mut self, _typ: &Type, _ctx: &Context) {
+        unreachable!()
     }
 
-    fn visit_sizeof_type(&mut self, expr: &SizeOfType<'_>) {
-        self.visit_type_impl(&expr.typ, false, true);
+    fn visit_typenode(&mut self, typ: &TypeNode, ctx: &Context) {
+        self.visit_type_impl(ctx.get_type(typ.inner), false, false, typ.span, ctx)
     }
 
-    fn visit_cast(&mut self, expr: &Cast<'_>) {
-        self.visit_expr(&expr.expr);
-        self.visit_type_impl(&expr.to_type, false, true);
+    fn visit_sizeof_type(&mut self, expr: &SizeOfType, ctx: &Context) {
+        self.visit_type_impl(
+            ctx.get_type(expr.typ.inner),
+            false,
+            true,
+            expr.typ.span,
+            ctx,
+        );
     }
 
-    fn visit_break(&mut self, stmt: &Break) {
+    fn visit_cast(&mut self, expr: &Cast, ctx: &Context) {
+        self.visit_expr(ctx.get_expr(expr.expr), ctx);
+        self.visit_type_impl(
+            ctx.get_type(expr.to_type.inner),
+            false,
+            true,
+            expr.to_type.span,
+            ctx,
+        );
+    }
+
+    fn visit_break(&mut self, stmt: &Break, _ctx: &Context) {
         if self.loop_depth == 0 {
             self.errors
                 .push(ASTValidationError::BreakNotWithinLoop { span: stmt.span });
         }
     }
 
-    fn visit_continue(&mut self, stmt: &Continue) {
+    fn visit_continue(&mut self, stmt: &Continue, _ctx: &Context) {
         if self.loop_depth == 0 {
             self.errors
                 .push(ASTValidationError::ContinueNotWithinLoop { span: stmt.span });
         }
     }
-
-    fn visit_while_loop(&mut self, stmt: &WhileLoop<'_>) {
-        self.visit_expr(&stmt.condition);
+    fn visit_while_loop(&mut self, stmt: &WhileLoop, ctx: &Context) {
+        self.visit_expr(ctx.get_expr(stmt.condition), ctx);
         self.loop_depth += 1;
-        self.visit_stmt(&stmt.body);
+        self.visit_stmt(ctx.get_stmt(stmt.body), ctx);
+        self.loop_depth -= 1;
+    }
+    fn visit_for_loop(&mut self, stmt: &ForLoop, ctx: &Context) {
+        if let Some(init) = stmt.init {
+            self.visit_stmt(ctx.get_stmt(init), ctx);
+        }
+        if let Some(condition) = stmt.condition {
+            self.visit_expr(ctx.get_expr(condition), ctx);
+        }
+        if let Some(post) = stmt.post {
+            self.visit_expr(ctx.get_expr(post), ctx);
+        }
+        self.loop_depth += 1;
+        self.visit_stmt(ctx.get_stmt(stmt.body), ctx);
         self.loop_depth -= 1;
     }
 
-    fn visit_for_loop(&mut self, stmt: &ForLoop<'_>) {
-        if let Some(init) = &stmt.init {
-            self.visit_stmt(init);
-        }
-        if let Some(condition) = &stmt.condition {
-            self.visit_expr(condition);
-        }
-        if let Some(post) = &stmt.post {
-            self.visit_expr(post);
-        }
-        self.loop_depth += 1;
-        self.visit_stmt(&stmt.body);
-        self.loop_depth -= 1;
-    }
-
-    fn visit_struct_init(&mut self, init: &StructInit<'_>) {
+    fn visit_struct_init(&mut self, init: &StructInit, ctx: &Context) {
         let mut map = AHashMap::new();
         for (name, expr) in &init.field_inits {
-            if let Some(span) = map.get(name.ident) {
+            if let Some(span) = map.get(&name.ident) {
                 self.errors
                     .push(ASTValidationError::DuplicateStructFieldInit {
-                        name: SmolStr::new(name.ident),
+                        name: name.ident,
                         field1: *span,
                         field2: name.span,
                     });
             } else {
                 map.insert(name.ident, name.span);
             }
-            self.visit_expr(expr);
+            self.visit_expr(ctx.get_expr(*expr), ctx);
         }
     }
 
-    fn visit_struct_declaration(&mut self, decl: &StructDeclaration<'_>) {
-        if let Some(span) = self.struct_scope.get(decl.name.ident) {
+    fn visit_struct_declaration(&mut self, decl: &StructDeclaration, ctx: &Context) {
+        if let Some(span) = self.struct_scope.get(&decl.name.ident) {
             self.errors.push(ASTValidationError::DuplicateStructDecl {
-                name: SmolStr::new(decl.name.ident),
+                name: decl.name.ident,
                 prev_def: *span,
                 new_def: decl.span,
             })
         } else {
-            self.struct_scope
-                .insert(SmolStr::new(decl.name.ident), decl.span);
+            self.struct_scope.insert(decl.name.ident, decl.span);
         }
         if decl.fields.is_empty() {
             self.errors.push(ASTValidationError::StructWithNoField {
                 decl: decl.span,
-                name: SmolStr::new(decl.name.ident),
+                name: decl.name.ident,
             })
         }
         let mut map = AHashMap::new();
         for (name, typ) in &decl.fields {
-            if let Some(span) = map.get(name.ident) {
+            if let Some(span) = map.get(&name.ident) {
                 self.errors
                     .push(ASTValidationError::DuplicateStructFieldDeclared {
-                        name: SmolStr::new(name.ident),
+                        name: name.ident,
                         field1: *span,
                         field2: name.span,
                     });
             } else {
                 map.insert(name.ident, name.span);
             }
-            self.visit_type(typ);
+            self.visit_typenode(typ, ctx);
         }
     }
 
-    fn visit_function_declaration(&mut self, decl: &FunctionDeclaration<'_>) {
-        if let Some(span) = self.global_var_scope.get(decl.name.ident) {
+    fn visit_function_declaration(&mut self, decl: &FunctionDeclaration, ctx: &Context) {
+        if let Some(span) = self.global_var_scope.get(&decl.name.ident) {
             self.errors.push(ASTValidationError::DuplicateGlobalSymbol {
-                symbol: SmolStr::new(decl.name.ident),
+                symbol: decl.name.ident,
                 symbol_type: GlobalSymbolType::Function,
                 prev_def: *span,
                 new_def: decl.span,
             })
         } else {
-            self.global_var_scope
-                .insert(SmolStr::new(decl.name.ident), decl.span);
+            self.global_var_scope.insert(decl.name.ident, decl.span);
         }
         let name = decl.name.ident;
-        if name == "main" && !self.no_main {
+        if ctx.get_symbol(name) == "main" && !self.no_main {
             self.found_main = true;
             if !decl.params.is_empty() {
                 self.errors
@@ -215,41 +227,46 @@ impl AstVisitor for ASTValidator {
         }
         let mut map = AHashMap::new();
         for (name, typ) in &decl.params {
-            if let Some(span) = map.get(name.ident) {
+            if let Some(span) = map.get(&name.ident) {
                 self.errors
                     .push(ASTValidationError::DuplicateParameterName {
-                        name: SmolStr::new(name.ident),
+                        name: name.ident,
                         param1: *span,
                         param2: name.span,
                     });
             } else {
                 map.insert(name.ident, name.span);
             }
-            self.visit_type_impl(typ, false, true);
+            self.visit_type_impl(ctx.get_type(typ.inner), false, true, typ.span, ctx);
         }
         if let Some(ret_type) = &decl.return_type {
-            self.visit_type_impl(ret_type, false, true);
+            self.visit_type_impl(
+                ctx.get_type(ret_type.inner),
+                false,
+                true,
+                ret_type.span,
+                ctx,
+            );
         }
-        self.visit_block(&decl.body);
+        self.visit_block(&decl.body, ctx);
     }
-
-    fn visit_global_declaration(&mut self, decl: &GlobalDeclaration<'_>) {
+    fn visit_global_declaration(&mut self, decl: &GlobalDeclaration, ctx: &Context) {
         match &decl.kind {
             GlobalDeclarationKind::Variable(variable_declaration) => {
-                self.visit_vardecl_global(variable_declaration)
+                self.visit_vardecl_global(variable_declaration, ctx)
             }
             GlobalDeclarationKind::Struct(struct_declaration) => {
-                self.visit_struct_declaration(struct_declaration)
+                self.visit_struct_declaration(struct_declaration, ctx)
             }
             GlobalDeclarationKind::Function(function_declaration) => {
-                self.visit_function_declaration(function_declaration)
+                self.visit_function_declaration(function_declaration, ctx)
             }
         }
     }
 
-    fn visit_program(&mut self, program: &Program<'_>) {
+    fn visit_program(&mut self, program: &Program, ctx: &Context) {
         for decl in &program.decls {
-            self.visit_global_declaration(decl);
+            self.visit_global_declaration(decl, ctx);
         }
         if !self.no_main && !self.found_main {
             self.errors.push(ASTValidationError::NoMain)
@@ -258,73 +275,84 @@ impl AstVisitor for ASTValidator {
 }
 
 impl ASTValidator {
-    fn visit_type_impl(&mut self, typ: &TypeNode<'_>, behind_ptr: bool, noalias_allowed: bool) {
-        match typ.inner {
-            TypeKind::Void => {
+    fn visit_type_impl(
+        &mut self,
+        typ: &Type,
+        behind_ptr: bool,
+        noalias_allowed: bool,
+        span: Span,
+        ctx: &Context,
+    ) {
+        match typ {
+            Type::Void => {
                 if !behind_ptr {
                     self.errors
-                        .push(ASTValidationError::VoidWithoutPtr { span: typ.span });
+                        .push(ASTValidationError::VoidWithoutPtr { span });
                 }
             }
-            TypeKind::Ptr { pointee, noalias } => {
+            Type::Ptr { pointee, noalias } => {
                 if *noalias && !noalias_allowed {
                     self.errors
-                        .push(ASTValidationError::InvalidNoAlias { span: typ.span });
+                        .push(ASTValidationError::InvalidNoAlias { span });
                 }
-                self.visit_type_impl(pointee, true, noalias_allowed);
+                self.visit_type_impl(ctx.get_type(*pointee), true, noalias_allowed, span, ctx);
             }
-            TypeKind::Array { element_type, .. } => {
-                self.visit_type_impl(element_type, false, noalias_allowed);
+            Type::Array { element_type, .. } => {
+                self.visit_type_impl(
+                    ctx.get_type(*element_type),
+                    false,
+                    noalias_allowed,
+                    span,
+                    ctx,
+                );
             }
-            TypeKind::FuncPtr {
+            Type::FuncPtr {
                 return_type,
                 param_types,
             } => {
                 if let Some(return_type) = return_type {
-                    self.visit_type_impl(return_type, false, true)
+                    self.visit_type_impl(ctx.get_type(*return_type), false, true, span, ctx)
                 }
                 for param_type in param_types {
-                    self.visit_type_impl(param_type, false, true)
+                    self.visit_type_impl(ctx.get_type(*param_type), false, true, span, ctx)
                 }
             }
             _ => (),
         }
     }
 
-    fn visit_vardecl_global(&mut self, decl: &VariableDeclaration<'_>) {
-        if let Some(span) = self.global_var_scope.get(decl.name.ident) {
+    fn visit_vardecl_global(&mut self, decl: &VariableDeclaration, ctx: &Context) {
+        if let Some(span) = self.global_var_scope.get(&decl.name.ident) {
             self.errors.push(ASTValidationError::DuplicateGlobalSymbol {
-                symbol: SmolStr::new(decl.name.ident),
+                symbol: decl.name.ident,
                 symbol_type: GlobalSymbolType::VariableName,
                 prev_def: *span,
                 new_def: decl.span,
             })
         } else {
-            self.global_var_scope
-                .insert(SmolStr::new(decl.name.ident), decl.span);
+            self.global_var_scope.insert(decl.name.ident, decl.span);
         }
-        self.visit_type(&decl.var_type);
+        self.visit_typenode(&decl.var_type, ctx);
         if let Some(init) = &decl.init_value {
-            self.visit_expr(init);
+            self.visit_expr(ctx.get_expr(*init), ctx);
         }
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use bumpalo::Bump;
 
     use super::*;
     use crate::syntax::{lexer::Lexer, parser::Parser};
 
     #[track_caller]
     fn validate(s: &str, no_main: bool, success: bool) {
-        let lexed = Lexer::lex(s);
+        let mut ctx = Context::new();
+        let lexed = Lexer::lex(s, &mut ctx);
         assert!(!lexed.has_errors());
-        let bump = Bump::new();
-        let parsed = Parser::parse(&lexed.tokens, &bump);
+        let parsed = Parser::parse(&lexed.tokens, &mut ctx);
         assert!(!parsed.has_errors());
-        let validation_errors = ASTValidator::validate(&parsed.program, no_main);
+        let validation_errors = ASTValidator::validate(&parsed.program, no_main, &ctx);
         assert_eq!(
             success,
             validation_errors.is_empty(),
