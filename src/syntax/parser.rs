@@ -1,8 +1,8 @@
-use bumpalo::Bump;
-use bumpalo::collections::Vec as BumpVec;
+use tinyvec::TinyVec;
 
 use crate::common::span::Span;
 use crate::syntax::ast::*;
+use crate::syntax::context::Context;
 use crate::syntax::lexer::{KeywordKind, Token, TokenKind};
 
 type Result<T> = std::result::Result<T, ParsingError>;
@@ -50,21 +50,21 @@ pub struct Parser<'t> {
 }
 
 #[derive(Debug)]
-pub struct ParseOutput<'a> {
-    pub program: Program<'a>,
+pub struct ParseOutput {
+    pub program: Program,
     pub errors: Vec<ParsingError>,
 }
 
-impl ParseOutput<'_> {
+impl ParseOutput {
     pub fn has_errors(&self) -> bool {
         !self.errors.is_empty()
     }
 }
 
 impl<'t> Parser<'t> {
-    pub fn parse<'a>(tokens: &'t Vec<Token>, bump: &'a Bump) -> ParseOutput<'a> {
+    pub fn parse(tokens: &'t Vec<Token>, ctx: &mut Context) -> ParseOutput {
         let parser = Parser::new(tokens);
-        parser.parse_inner(bump)
+        parser.parse_inner(ctx)
     }
     fn new(tokens: &'t Vec<Token>) -> Self {
         Self {
@@ -74,10 +74,10 @@ impl<'t> Parser<'t> {
             id: 0,
         }
     }
-    fn parse_inner<'a>(mut self, bump: &'a Bump) -> ParseOutput<'a> {
-        let mut decls = BumpVec::new_in(bump);
+    fn parse_inner(mut self, ctx: &mut Context) -> ParseOutput {
+        let mut decls = Vec::new();
         while !self.is_at_end() {
-            let decl = self.parse_global_decl(bump);
+            let decl = self.parse_global_decl(ctx);
             match decl {
                 Ok(decl) => {
                     decls.push(decl);
@@ -128,20 +128,21 @@ impl<'t> Parser<'t> {
             self.advance()
         }
     }
-    fn parse_struct_init<'a>(&mut self, bump: &'a Bump) -> Result<Expr<'a>> {
-        let ident = self.parse_ident(bump)?;
+    fn parse_struct_init(&mut self, ctx: &mut Context) -> Result<Expr> {
+        let ident = self.parse_ident(ctx)?;
         self.expect(
             TokenKind::LCurly,
             "Expected '{' after struct name in struct initialization",
         )?;
-        let mut field_inits = BumpVec::new_in(bump);
+        let mut field_inits = TinyVec::new();
         while !self.match_token(TokenKind::RCurly)? {
-            let name = self.parse_ident(bump)?;
+            let name = self.parse_ident(ctx)?;
             self.expect(
                 TokenKind::Colon,
                 "Expected ':' after member name in struct initialization",
             )?;
-            let value = self.parse_expr(bump)?;
+            let value = self.parse_expr(ctx)?;
+            let value = ctx.intern_expr(value);
             field_inits.push((name, value));
             if self.match_token(TokenKind::Comma)? {
                 self.advance();
@@ -155,19 +156,20 @@ impl<'t> Parser<'t> {
         )?;
         let span = Span::new(ident.span.start, close_curly.span.end);
         let id = self.next_id();
-        let init = bump.alloc(ExprKind::StructInit(StructInit {
+        let init = ExprKind::StructInit(StructInit {
             name: ident,
             field_inits,
             span,
             id,
-        }));
+        });
         Ok(Expr::new(init, span, id))
     }
-    fn parse_array_init<'a>(&mut self, bump: &'a Bump) -> Result<Expr<'a>> {
+    fn parse_array_init(&mut self, ctx: &mut Context) -> Result<Expr> {
         let token = self.expect_or_ice(TokenKind::LSquare);
-        let mut elements = BumpVec::new_in(bump);
+        let mut elements = TinyVec::new();
         while !self.match_token(TokenKind::RSquare)? {
-            let elem = self.parse_expr(bump)?;
+            let elem = self.parse_expr(ctx)?;
+            let elem = ctx.intern_expr(elem);
             elements.push(elem);
             if self.match_token(TokenKind::Comma)? {
                 self.advance();
@@ -181,14 +183,14 @@ impl<'t> Parser<'t> {
         )?;
         let span = Span::new(token.span.start, rsquare.span.end);
         let id = self.next_id();
-        let init = bump.alloc(ExprKind::ArrayInit(ArrayInit { elements, span, id }));
+        let init = ExprKind::ArrayInit(ArrayInit { elements, span, id });
         Ok(Expr::new(init, span, id))
     }
-    fn parse_global_decl<'a>(&mut self, bump: &'a Bump) -> Result<GlobalDeclaration<'a>> {
+    fn parse_global_decl(&mut self, ctx: &mut Context) -> Result<GlobalDeclaration> {
         let token = self.current()?;
         match token.kind {
             TokenKind::Keyword(KeywordKind::Struct) => {
-                let decl = self.parse_struct_decl(bump)?;
+                let decl = self.parse_struct_decl(ctx)?;
                 let span = decl.span;
                 let id = decl.id;
                 Ok(GlobalDeclaration {
@@ -198,7 +200,7 @@ impl<'t> Parser<'t> {
                 })
             }
             TokenKind::Keyword(KeywordKind::Fn) => {
-                let decl = self.parse_function_decl(bump)?;
+                let decl = self.parse_function_decl(ctx)?;
                 let span = decl.span;
                 let id = decl.id;
                 Ok(GlobalDeclaration {
@@ -208,7 +210,7 @@ impl<'t> Parser<'t> {
                 })
             }
             TokenKind::Keyword(KeywordKind::Let) => {
-                let decl = self.parse_variable_decl(bump)?;
+                let decl = self.parse_variable_decl(ctx)?;
                 if !self.match_token(TokenKind::Semicolon)? {
                     self.errors.push(ParsingError::ExpectedOtherToken {
                         expected: TokenKind::Semicolon,
@@ -229,48 +231,48 @@ impl<'t> Parser<'t> {
             _ => Err(ParsingError::ExpectedGlobalDecl { found: token }),
         }
     }
-    fn parse_stmt<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
+    fn parse_stmt(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let token = self.current()?;
         let stmt = match token.kind {
             TokenKind::LCurly => {
-                let block = self.parse_block(bump)?;
+                let block = self.parse_block(ctx)?;
                 let span = block.span;
                 let id = block.id;
-                let kind = bump.alloc(StmtKind::Block(block));
+                let kind = StmtKind::Block(block);
                 return Ok(Stmt { kind, span, id });
             }
             TokenKind::Keyword(KeywordKind::Continue) => {
                 self.advance();
                 let span = token.span;
                 let id = self.next_id();
-                let kind = bump.alloc(StmtKind::Continue(Continue { span, id }));
+                let kind = StmtKind::Continue(Continue { span, id });
                 Stmt { kind, span, id }
             }
             TokenKind::Keyword(KeywordKind::Break) => {
                 self.advance();
                 let span = token.span;
                 let id = self.next_id();
-                let kind = bump.alloc(StmtKind::Break(Break { span, id }));
+                let kind = StmtKind::Break(Break { span, id });
                 Stmt { kind, span, id }
             }
-            TokenKind::Keyword(KeywordKind::Return) => return self.parse_return_stmt(bump),
-            TokenKind::Keyword(KeywordKind::While) => return self.parse_while_loop(bump),
-            TokenKind::Keyword(KeywordKind::For) => return self.parse_for_loop(bump),
-            TokenKind::Keyword(KeywordKind::If) => return self.parse_if_stmt(bump),
+            TokenKind::Keyword(KeywordKind::Return) => return self.parse_return_stmt(ctx),
+            TokenKind::Keyword(KeywordKind::While) => return self.parse_while_loop(ctx),
+            TokenKind::Keyword(KeywordKind::For) => return self.parse_for_loop(ctx),
+            TokenKind::Keyword(KeywordKind::If) => return self.parse_if_stmt(ctx),
             TokenKind::Keyword(KeywordKind::Let) => {
-                let decl = self.parse_variable_decl(bump)?;
+                let decl = self.parse_variable_decl(ctx)?;
                 let span = decl.span;
                 let id = decl.id;
-                let kind = bump.alloc(StmtKind::VariableDeclaration(decl));
+                let kind = StmtKind::VariableDeclaration(decl);
                 Stmt { kind, span, id }
             }
             #[cfg(test)]
-            TokenKind::Keyword(KeywordKind::Assert) => self.parse_assert(bump)?,
+            TokenKind::Keyword(KeywordKind::Assert) => self.parse_assert(ctx)?,
             _ => {
-                let expr = self.parse_expr(bump)?;
+                let expr = self.parse_expr(ctx)?;
                 let span = expr.span;
                 let id = expr.id;
-                let kind = bump.alloc(StmtKind::Expr(expr));
+                let kind = StmtKind::Expr(expr);
                 Stmt { kind, span, id }
             }
         };
@@ -286,8 +288,8 @@ impl<'t> Parser<'t> {
         }
         Ok(stmt)
     }
-    fn parse_expr<'a>(&mut self, bump: &'a Bump) -> Result<Expr<'a>> {
-        self.expr_bp(0, bump)
+    fn parse_expr(&mut self, ctx: &mut Context) -> Result<Expr> {
+        self.expr_bp(0, ctx)
     }
     fn recover_stmt(&mut self) -> Result<()> {
         loop {
@@ -302,7 +304,17 @@ impl<'t> Parser<'t> {
             }
         }
     }
-    fn parse_type<'a>(&mut self, bump: &'a Bump) -> Result<Type<'a>> {
+    fn parse_type_node(&mut self, ctx: &mut Context) -> Result<TypeNode> {
+        let (typ, span) = self.parse_type(ctx)?;
+        let id = self.next_id();
+
+        Ok(TypeNode {
+            inner: ctx.intern_type(typ),
+            span,
+            id,
+        })
+    }
+    fn parse_type(&mut self, ctx: &mut Context) -> Result<(Type, Span)> {
         while self.current()?.kind == TokenKind::Error {
             self.advance();
         }
@@ -310,9 +322,7 @@ impl<'t> Parser<'t> {
         match token.kind {
             TokenKind::Keyword(KeywordKind::Int) => {
                 self.advance();
-                let kind = bump.alloc(TypeKind::Int);
-                let id = self.next_id();
-                Ok(Type::new(kind, token.span, id))
+                Ok((Type::Int, token.span))
             }
             TokenKind::Keyword(KeywordKind::Fn) => {
                 self.advance();
@@ -320,9 +330,11 @@ impl<'t> Parser<'t> {
                     TokenKind::LParen,
                     "Expected '(' after 'fn' in function pointer",
                 )?;
-                let mut param_types = BumpVec::new_in(bump);
+                let mut param_types = TinyVec::new();
                 while !self.match_token(TokenKind::RParen)? {
-                    param_types.push(self.parse_type(bump)?);
+                    let (typ, _span) = self.parse_type(ctx)?;
+                    let typ = ctx.intern_type(typ);
+                    param_types.push(typ);
                     if self.match_token(TokenKind::Comma)? {
                         self.advance()
                     } else {
@@ -336,25 +348,24 @@ impl<'t> Parser<'t> {
                 let mut span = Span::new(token.span.start, end_tok.span.end);
                 let return_type = if self.match_token(TokenKind::Arrow)? {
                     self.advance();
-                    let typ = self.parse_type(bump)?;
-                    span.end = typ.span.end;
+                    let (typ, ret_span) = self.parse_type(ctx)?;
+                    let typ = ctx.intern_type(typ);
+                    span.end = ret_span.end;
                     Some(typ)
                 } else {
                     None
                 };
-                let kind = bump.alloc(TypeKind::FuncPtr {
-                    return_type,
-                    param_types,
-                });
-                let id = self.next_id();
-
-                Ok(Type::new(kind, span, id))
+                Ok((
+                    Type::FuncPtr {
+                        return_type,
+                        param_types,
+                    },
+                    span,
+                ))
             }
             TokenKind::Keyword(KeywordKind::Void) => {
                 self.advance();
-                let kind = bump.alloc(TypeKind::Void);
-                let id = self.next_id();
-                Ok(Type::new(kind, token.span, id))
+                Ok((Type::Void, token.span))
             }
             TokenKind::Keyword(KeywordKind::NoAlias) => {
                 self.advance();
@@ -365,19 +376,17 @@ impl<'t> Parser<'t> {
                         msg: "Expected pointer '*' after 'noalias'",
                     });
                 }
-                self.parse_pointer(token, true, bump)
+                self.parse_pointer(token, true, ctx)
             }
-            TokenKind::Asterisk => self.parse_pointer(token, false, bump),
+            TokenKind::Asterisk => self.parse_pointer(token, false, ctx),
             TokenKind::Ident(_) => {
-                let ident = self.parse_ident(bump)?;
-                let span = ident.span;
-                let id = ident.id;
-                let kind = bump.alloc(TypeKind::Struct { name: ident });
-                Ok(Type::new(kind, span, id))
+                let ident = self.parse_ident(ctx)?;
+                Ok((Type::Struct { name: ident.ident }, ident.span))
             }
             TokenKind::LSquare => {
                 self.advance();
-                let element_type = self.parse_type(bump)?;
+                let (element_type, _element_span) = self.parse_type(ctx)?;
+                let element_type = ctx.intern_type(element_type);
                 self.expect(
                     TokenKind::Semicolon,
                     "Expected ';' in array type separating element type and size",
@@ -403,90 +412,82 @@ impl<'t> Parser<'t> {
                 self.advance();
                 let end_tok =
                     self.expect(TokenKind::RSquare, "Expected ']' at end of array type")?;
-                let kind = bump.alloc(TypeKind::Array { element_type, size });
-                let id = self.next_id();
-
-                Ok(Type::new(
-                    kind,
+                Ok((
+                    Type::Array {
+                        element_type,
+                        len: size,
+                    },
                     Span::new(token.span.start, end_tok.span.end),
-                    id,
                 ))
             }
             TokenKind::Comma | TokenKind::Equal | TokenKind::Semicolon | TokenKind::RParen => {
+                let span = token.span;
                 self.errors
                     .push(ParsingError::ExpectedType { found: token });
-                let alloced = bump.alloc(TypeKind::Error);
-                let id = self.next_id();
-                Ok(Type::new(alloced, Span::empty(), id))
+                Ok((Type::Void, span))
             }
             _ => Err(ParsingError::ExpectedType { found: token }),
         }
     }
 
-    fn parse_pointer<'a>(
+    fn parse_pointer(
         &mut self,
         token: Token,
         noalias: bool,
-        bump: &'a Bump,
-    ) -> Result<Type<'a>> {
+        ctx: &mut Context,
+    ) -> Result<(Type, Span)> {
         let mut count = 0;
         while self.match_token(TokenKind::Asterisk)? {
             count += 1;
             self.advance();
         }
-        let mut typ = self.parse_type(bump)?;
+        let (mut typ, span) = self.parse_type(ctx)?;
         for i in 0..count {
             let is_last = i == count - 1;
-            let end = typ.span.end;
-            let id = self.next_id();
-            typ = Type::new(
-                bump.alloc(TypeKind::Ptr {
-                    pointee: typ,
-                    noalias: if is_last { noalias } else { false },
-                }),
-                Span::new(token.span.start + i, end),
-                id,
-            );
+            typ = Type::Ptr {
+                pointee: ctx.intern_type(typ),
+                noalias: if is_last { noalias } else { false },
+            };
         }
-        Ok(typ)
+        Ok((typ, Span::new(token.span.start, span.end)))
     }
     #[cfg(test)]
-    fn parse_assert<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
+    fn parse_assert(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let token = self.current()?;
         self.advance();
         self.expect(TokenKind::LParen, "Expected '(' after assert")?;
-        let expr = self.parse_expr(bump)?;
+        let expr = self.parse_expr(ctx)?;
         let rparen = self.expect(TokenKind::RParen, "Expected ')' after assert expression")?;
         let span = Span::new(token.span.start, rparen.span.end);
         let id = self.next_id();
-        let kind = bump.alloc(StmtKind::Assert(Assert {
-            condition: expr,
+        let kind = StmtKind::Assert(Assert {
+            condition: ctx.intern_expr(expr),
             span,
             id,
-        }));
+        });
         Ok(Stmt { kind, span, id })
     }
-    fn parse_ident_type_pair<'a>(&mut self, bump: &'a Bump) -> Result<(Ident<'a>, Type<'a>)> {
-        let ident = self.parse_ident(bump)?;
+    fn parse_ident_type_pair(&mut self, ctx: &mut Context) -> Result<(Ident, TypeNode)> {
+        let ident = self.parse_ident(ctx)?;
         self.expect(
             TokenKind::Colon,
             "Expected ':' after ident in ident: type pair",
         )?;
-        let typ = self.parse_type(bump)?;
+        let typ = self.parse_type_node(ctx)?;
         Ok((ident, typ))
     }
-    fn parse_variable_decl<'a>(&mut self, bump: &'a Bump) -> Result<VariableDeclaration<'a>> {
+    fn parse_variable_decl(&mut self, ctx: &mut Context) -> Result<VariableDeclaration> {
         let let_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Let));
-        let name = self.parse_ident(bump)?;
+        let name = self.parse_ident(ctx)?;
         self.expect(
             TokenKind::Colon,
             "Expected ':' after variable name in variable declaration",
         )?;
-        let typ = self.parse_type(bump)?;
+        let typ = self.parse_type_node(ctx)?;
         let mut span = Span::new(let_kw.span.start, typ.span.end);
         let init_value = if let Ok(true) = self.match_token(TokenKind::Equal) {
             self.advance();
-            let expr = self.parse_expr(bump)?;
+            let expr = self.parse_expr(ctx)?;
             span.end = expr.span.end;
             Some(expr)
         } else {
@@ -496,21 +497,21 @@ impl<'t> Parser<'t> {
         Ok(VariableDeclaration {
             var_type: typ,
             name,
-            init_value,
+            init_value: init_value.map(|v| ctx.intern_expr(v)),
             span,
             id,
         })
     }
-    fn parse_function_decl<'a>(&mut self, bump: &'a Bump) -> Result<FunctionDeclaration<'a>> {
+    fn parse_function_decl(&mut self, ctx: &mut Context) -> Result<FunctionDeclaration> {
         let fn_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Fn));
-        let name = self.parse_ident(bump)?;
+        let name = self.parse_ident(ctx)?;
         self.expect(
             TokenKind::LParen,
             "Expected '(' after function name in declaration",
         )?;
-        let mut params = BumpVec::new_in(bump);
+        let mut params = TinyVec::new();
         while !self.match_token(TokenKind::RParen)? {
-            let pair = self.parse_ident_type_pair(bump)?;
+            let pair = self.parse_ident_type_pair(ctx)?;
             params.push(pair);
             if self.match_token(TokenKind::Comma)? {
                 self.advance();
@@ -524,13 +525,13 @@ impl<'t> Parser<'t> {
             TokenKind::LCurly => None,
             TokenKind::Arrow => {
                 self.advance();
-                Some(self.parse_type(bump)?)
+                Some(self.parse_type_node(ctx)?)
             }
             _ => {
                 return Err(ParsingError::ExpectedReturnType { found: token });
             }
         };
-        let body = self.parse_block(bump)?;
+        let body = self.parse_block(ctx)?;
         let span = Span::new(fn_kw.span.start, body.span.end);
         let id = self.next_id();
         Ok(FunctionDeclaration {
@@ -542,13 +543,13 @@ impl<'t> Parser<'t> {
             id,
         })
     }
-    fn parse_struct_decl<'a>(&mut self, bump: &'a Bump) -> Result<StructDeclaration<'a>> {
+    fn parse_struct_decl(&mut self, ctx: &mut Context) -> Result<StructDeclaration> {
         let struct_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Struct));
-        let name = self.parse_ident(bump)?;
+        let name = self.parse_ident(ctx)?;
         self.expect(TokenKind::LCurly, "Expected '{' after struct name")?;
-        let mut members = BumpVec::new_in(bump);
+        let mut members = TinyVec::new();
         while !self.match_token(TokenKind::RCurly)? {
-            let pair = self.parse_ident_type_pair(bump)?;
+            let pair = self.parse_ident_type_pair(ctx)?;
             members.push(pair);
             if self.match_token(TokenKind::Comma)? {
                 self.advance()
@@ -569,12 +570,12 @@ impl<'t> Parser<'t> {
             id,
         })
     }
-    fn parse_block<'a>(&mut self, bump: &'a Bump) -> Result<Block<'a>> {
+    fn parse_block(&mut self, ctx: &mut Context) -> Result<Block> {
         let lcurly = self.expect(TokenKind::LCurly, "Expected '{' to start block")?;
-        let mut statements = BumpVec::new_in(bump);
+        let mut statements = TinyVec::new();
         while !self.match_token(TokenKind::RCurly)? {
-            match self.parse_stmt(bump) {
-                Ok(s) => statements.push(s),
+            match self.parse_stmt(ctx) {
+                Ok(s) => statements.push(ctx.intern_stmt(s)),
                 Err(e) => {
                     self.recover_stmt()?;
                     self.errors.push(e);
@@ -590,134 +591,133 @@ impl<'t> Parser<'t> {
             id,
         })
     }
-    fn parse_if_stmt<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
+    fn parse_if_stmt(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let if_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::If));
         self.expect(TokenKind::LParen, "Expected '(' after 'if'")?;
-        let condition = self.parse_expr(bump)?;
+        let condition = self.parse_expr(ctx)?;
         self.expect(TokenKind::RParen, "Expected ')' after if condition")?;
-        let then_branch = self.parse_stmt(bump)?;
+        let then_branch = self.parse_stmt(ctx)?;
         let mut span = Span::new(if_kw.span.start, then_branch.span.end);
         let else_branch = if self.match_token(TokenKind::Keyword(KeywordKind::Else))? {
             self.advance();
-            let stmt = self.parse_stmt(bump)?;
+            let stmt = self.parse_stmt(ctx)?;
             span.end = stmt.span.end;
             Some(stmt)
         } else {
             None
         };
         let id = self.next_id();
-        let kind = bump.alloc(StmtKind::IfStmt(IfStmt {
-            condition,
-            then_branch,
-            else_branch,
+        let kind = StmtKind::IfStmt(IfStmt {
+            condition: ctx.intern_expr(condition),
+            then_branch: ctx.intern_stmt(then_branch),
+            else_branch: else_branch.map(|s| ctx.intern_stmt(s)),
             span,
             id,
-        }));
+        });
         Ok(Stmt { kind, span, id })
     }
-    fn parse_while_loop<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
+    fn parse_while_loop(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let while_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::While));
         self.expect(TokenKind::LParen, "Expected '(' after 'while'")?;
-        let condition = self.parse_expr(bump)?;
+        let condition = self.parse_expr(ctx)?;
         self.expect(TokenKind::RParen, "Expected ')' after while loop condition")?;
-        let body = self.parse_stmt(bump)?;
+        let body = self.parse_stmt(ctx)?;
         let span = Span::new(while_kw.span.start, body.span.end);
         let id = self.next_id();
-        let kind = bump.alloc(StmtKind::WhileLoop(WhileLoop {
-            condition,
-            body,
+        let kind = StmtKind::WhileLoop(WhileLoop {
+            condition: ctx.intern_expr(condition),
+            body: ctx.intern_stmt(body),
             span,
             id,
-        }));
+        });
         Ok(Stmt { kind, span, id })
     }
-    fn parse_for_loop<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
+    fn parse_for_loop(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let for_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::For));
         self.expect(TokenKind::LParen, "Expected '(' after 'for'")?;
         let token = self.current()?;
         let init = match token.kind {
             TokenKind::Keyword(KeywordKind::Let) => {
-                let vardecl = self.parse_variable_decl(bump)?;
+                let vardecl = self.parse_variable_decl(ctx)?;
                 let span = vardecl.span;
                 let id = vardecl.id;
-                let kind = bump.alloc(StmtKind::VariableDeclaration(vardecl));
+                let kind = StmtKind::VariableDeclaration(vardecl);
                 Some(Stmt { kind, span, id })
             }
             TokenKind::Semicolon => None,
             _ => {
-                let expr = self.parse_expr(bump)?;
+                let expr = self.parse_expr(ctx)?;
                 let span = expr.span;
                 let id = expr.id;
-                let kind = bump.alloc(StmtKind::Expr(expr));
+                let kind = StmtKind::Expr(expr);
                 Some(Stmt { kind, span, id })
             }
         };
         self.expect(TokenKind::Semicolon, "Expected ';' after loop initializer")?;
         let condition = match self.match_token(TokenKind::Semicolon)? {
-            false => Some(self.parse_expr(bump)?),
+            false => Some(self.parse_expr(ctx)?),
             true => None,
         };
         self.expect(TokenKind::Semicolon, "Expected ';' after loop condition")?;
         let post = match self.match_token(TokenKind::RParen)? {
-            false => Some(self.parse_expr(bump)?),
+            false => Some(self.parse_expr(ctx)?),
             true => None,
         };
         self.expect(TokenKind::RParen, "Expected ')' after for loop increment")?;
-        let body = self.parse_stmt(bump)?;
+        let body = self.parse_stmt(ctx)?;
         let span = Span::new(for_kw.span.start, body.span.end);
         let id = self.next_id();
-        let kind = bump.alloc(StmtKind::ForLoop(ForLoop {
-            init,
-            condition,
-            post,
-            body,
+        let kind = StmtKind::ForLoop(ForLoop {
+            init: init.map(|s| ctx.intern_stmt(s)),
+            condition: condition.map(|e| ctx.intern_expr(e)),
+            post: post.map(|e| ctx.intern_expr(e)),
+            body: ctx.intern_stmt(body),
             span,
             id,
-        }));
+        });
         Ok(Stmt { kind, span, id })
     }
-    fn parse_return_stmt<'a>(&mut self, bump: &'a Bump) -> Result<Stmt<'a>> {
+    fn parse_return_stmt(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let return_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Return));
         if self.match_token(TokenKind::Semicolon)? {
             self.advance();
             let id = self.next_id();
-            let stmt = bump.alloc(StmtKind::ReturnStmt(ReturnStmt {
+            let stmt = StmtKind::ReturnStmt(ReturnStmt {
                 value: None,
                 span: return_kw.span,
                 id,
-            }));
+            });
             return Ok(Stmt {
                 kind: stmt,
                 span: return_kw.span,
                 id,
             });
         }
-        let value = self.parse_expr(bump)?;
+        let value = self.parse_expr(ctx)?;
         self.expect(TokenKind::Semicolon, "Expected ';' after return stmt")?;
         let span = Span::new(return_kw.span.start, value.span.end);
 
         let id = self.next_id();
-        let stmt = bump.alloc(StmtKind::ReturnStmt(ReturnStmt {
-            value: Some(value),
+        let stmt = StmtKind::ReturnStmt(ReturnStmt {
+            value: Some(ctx.intern_expr(value)),
             span,
             id,
-        }));
+        });
         Ok(Stmt {
             kind: stmt,
             span,
             id,
         })
     }
-    fn parse_ident<'a>(&mut self, bump: &'a Bump) -> Result<Ident<'a>> {
+    fn parse_ident(&mut self, _ctx: &mut Context) -> Result<Ident> {
         let token = self.current()?;
-        let TokenKind::Ident(id) = token.kind else {
+        let TokenKind::Ident(symbol) = token.kind else {
             return Err(ParsingError::ExpectedIdent { found: token });
         };
         self.advance();
-        let s = bump.alloc_str(&id);
         let id = self.next_id();
         Ok(Ident {
-            ident: s,
+            ident: symbol,
             span: token.span,
             id,
         })
@@ -725,14 +725,14 @@ impl<'t> Parser<'t> {
 }
 
 impl<'t> Parser<'t> {
-    fn expr_bp<'a>(&mut self, min_bp: u8, bump: &'a Bump) -> Result<Expr<'a>> {
+    fn expr_bp(&mut self, min_bp: u8, ctx: &mut Context) -> Result<Expr> {
         let token = self.current()?;
         let mut lhs = if let Some(((), bp)) = prefix_binding_power(&token.kind) {
             self.advance();
-            let expr = self.expr_bp(bp, bump)?;
-            self.handle_prefix(token, expr, bump)?
+            let expr = self.expr_bp(bp, ctx)?;
+            self.handle_prefix(token, expr, ctx)?
         } else {
-            let Some(atom) = self.parse_atom(bump)? else {
+            let Some(atom) = self.parse_atom(ctx)? else {
                 return Err(ParsingError::ExpectedExpr { found: token });
             };
             atom
@@ -749,7 +749,7 @@ impl<'t> Parser<'t> {
                 if bp < min_bp {
                     break;
                 }
-                lhs = self.handle_postfix(lhs, token, bump)?;
+                lhs = self.handle_postfix(lhs, token, ctx)?;
                 continue;
             }
             if let Some((l_bp, r_bp)) = infix_binding_power(&token.kind) {
@@ -758,59 +758,59 @@ impl<'t> Parser<'t> {
                 }
                 self.advance();
                 if let TokenKind::QuestionMark = token.kind {
-                    let true_branch = self.parse_expr(bump)?;
+                    let true_branch = self.parse_expr(ctx)?;
                     self.expect(TokenKind::Colon, "Expected ':' in ternary operator")?;
-                    let false_branch = self.expr_bp(r_bp, bump)?;
+                    let false_branch = self.expr_bp(r_bp, ctx)?;
                     let condition = lhs;
                     let span = Span::new(condition.span.start, false_branch.span.end);
                     let id = self.next_id();
-                    let kind = bump.alloc(ExprKind::Ternary(Ternary {
-                        condition,
-                        true_branch,
-                        false_branch,
+                    let kind = ExprKind::Ternary(Ternary {
+                        condition: ctx.intern_expr(condition),
+                        true_branch: ctx.intern_expr(true_branch),
+                        false_branch: ctx.intern_expr(false_branch),
                         span,
                         id,
-                    }));
+                    });
                     lhs = Expr::new(kind, span, id);
                     continue;
                 }
-                let rhs = self.expr_bp(r_bp, bump)?;
-                lhs = self.handle_infix(lhs, token, rhs, bump)?;
+                let rhs = self.expr_bp(r_bp, ctx)?;
+                lhs = self.handle_infix(lhs, token, rhs, ctx)?;
                 continue;
             }
             break;
         }
         Ok(lhs)
     }
-    fn parse_atom<'a>(&mut self, bump: &'a Bump) -> Result<Option<Expr<'a>>> {
+    fn parse_atom(&mut self, ctx: &mut Context) -> Result<Option<Expr>> {
         let token = self.current()?;
         match token.kind {
             TokenKind::Keyword(KeywordKind::Sizeof) => {
                 self.advance();
                 self.expect(TokenKind::LParen, "Expected '(' after sizeof")?;
-                let typ = self.parse_type(bump)?;
+                let typ = self.parse_type_node(ctx)?;
                 let end_tok = self.expect(TokenKind::RParen, "Expected ')' after sizeof type")?;
                 let span = Span::new(token.span.start, end_tok.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::SizeOfType(SizeOfType { typ, span, id }));
+                let kind = ExprKind::SizeOfType(SizeOfType { typ, span, id });
                 Ok(Some(Expr::new(kind, span, id)))
             }
             TokenKind::Keyword(KeywordKind::Nullptr) => {
                 self.advance();
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::Nullptr(Nullptr {
+                let kind = ExprKind::Nullptr(Nullptr {
                     span: token.span,
                     id,
-                }));
+                });
                 Ok(Some(Expr::new(kind, token.span, id)))
             }
             TokenKind::LParen => {
                 self.advance();
-                let expr = self.parse_expr(bump)?;
+                let expr = self.parse_expr(ctx)?;
                 self.expect(TokenKind::RParen, "Expected ')' after parenthesized expr")?;
                 Ok(Some(expr))
             }
-            TokenKind::LSquare => Ok(Some(self.parse_array_init(bump)?)),
+            TokenKind::LSquare => Ok(Some(self.parse_array_init(ctx)?)),
             TokenKind::IntLiteral { value, minus } => {
                 self.advance();
                 let span = token.span;
@@ -824,11 +824,11 @@ impl<'t> Parser<'t> {
                     }
                 };
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::Int(Int {
+                let kind = ExprKind::Int(Int {
                     lit: value,
                     span,
                     id,
-                }));
+                });
                 Ok(Some(Expr::new(kind, span, id)))
             }
             TokenKind::Ident(s) => {
@@ -837,16 +837,15 @@ impl<'t> Parser<'t> {
                     ..
                 }) = self.next()
                 {
-                    Ok(Some(self.parse_struct_init(bump)?))
+                    Ok(Some(self.parse_struct_init(ctx)?))
                 } else {
                     self.advance();
-                    let s = bump.alloc_str(&s);
                     let id = self.next_id();
-                    let kind = bump.alloc(ExprKind::Ident(Ident {
+                    let kind = ExprKind::Ident(Ident {
                         ident: s,
                         span: token.span,
                         id,
-                    }));
+                    });
                     Ok(Some(Expr::new(kind, token.span, id)))
                 }
             }
@@ -854,7 +853,7 @@ impl<'t> Parser<'t> {
         }
     }
 
-    fn handle_prefix<'a>(&mut self, op: Token, expr: Expr<'a>, bump: &'a Bump) -> Result<Expr<'a>> {
+    fn handle_prefix(&mut self, op: Token, expr: Expr, ctx: &mut Context) -> Result<Expr> {
         let kind = match op.kind {
             TokenKind::DoublePlus => PrefixOpKind::Increment,
             TokenKind::DoubleMinus => PrefixOpKind::Decrement,
@@ -868,21 +867,15 @@ impl<'t> Parser<'t> {
         };
         let span = Span::new(op.span.start, expr.span.end);
         let id = self.next_id();
-        let kind = bump.alloc(ExprKind::PrefixOp(PrefixOp {
+        let kind = ExprKind::PrefixOp(PrefixOp {
             kind,
-            expr,
+            expr: ctx.intern_expr(expr),
             span,
             id,
-        }));
+        });
         Ok(Expr::new(kind, span, id))
     }
-    fn handle_infix<'a>(
-        &mut self,
-        lhs: Expr<'a>,
-        op: Token,
-        rhs: Expr<'a>,
-        bump: &'a Bump,
-    ) -> Result<Expr<'a>> {
+    fn handle_infix(&mut self, lhs: Expr, op: Token, rhs: Expr, ctx: &mut Context) -> Result<Expr> {
         let binop_kind = match op.kind {
             TokenKind::Asterisk => BinaryOpKind::Mul,
             TokenKind::Slash => BinaryOpKind::Div,
@@ -913,27 +906,23 @@ impl<'t> Parser<'t> {
         };
         let span = Span::new(lhs.span.start, rhs.span.end);
         let id = self.next_id();
-        let exprkind = bump.alloc(ExprKind::BinaryOp(BinaryOp {
+        let exprkind = ExprKind::BinaryOp(BinaryOp {
             kind: binop_kind,
-            left: lhs,
-            right: rhs,
+            left: ctx.intern_expr(lhs),
+            right: ctx.intern_expr(rhs),
             span,
             id,
-        }));
+        });
         Ok(Expr::new(exprkind, span, id))
     }
-    fn handle_postfix<'a>(
-        &mut self,
-        expr: Expr<'a>,
-        op: Token,
-        bump: &'a Bump,
-    ) -> Result<Expr<'a>> {
+    fn handle_postfix(&mut self, expr: Expr, op: Token, ctx: &mut Context) -> Result<Expr> {
         self.advance();
         match op.kind {
             TokenKind::LParen => {
-                let mut args = BumpVec::new_in(bump);
+                let mut args = TinyVec::new();
                 while !self.match_token(TokenKind::RParen)? {
-                    args.push(self.parse_expr(bump)?);
+                    let expr = self.parse_expr(ctx)?;
+                    args.push(ctx.intern_expr(expr));
                     if self.match_token(TokenKind::Comma)? {
                         self.advance();
                     } else {
@@ -943,79 +932,79 @@ impl<'t> Parser<'t> {
                 let rparen = self.expect(TokenKind::RParen, "Expected ')' after argument list")?;
                 let span = Span::new(expr.span.start, rparen.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::FunctionCall(FunctionCall {
-                    func_expr: expr,
+                let kind = ExprKind::FunctionCall(FunctionCall {
+                    func_expr: ctx.intern_expr(expr),
                     args,
                     span,
                     id,
-                }));
+                });
                 Ok(Expr::new(kind, span, id))
             }
             TokenKind::LSquare => {
-                let index = self.parse_expr(bump)?;
+                let index = self.parse_expr(ctx)?;
                 let rsquare = self.expect(
                     TokenKind::RSquare,
                     "Expected ']' after array index expression",
                 )?;
                 let span = Span::new(expr.span.start, rsquare.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::ArrayIndex(ArrayIndex {
-                    array: expr,
-                    index,
+                let kind = ExprKind::ArrayIndex(ArrayIndex {
+                    array: ctx.intern_expr(expr),
+                    index: ctx.intern_expr(index),
                     span,
                     id,
-                }));
+                });
                 Ok(Expr::new(kind, span, id))
             }
             TokenKind::Period => {
-                let ident = self.parse_ident(bump)?;
+                let ident = self.parse_ident(ctx)?;
                 let span = Span::new(expr.span.start, ident.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::MemberAccess(MemberAccess {
-                    struct_expr: expr,
+                let kind = ExprKind::MemberAccess(MemberAccess {
+                    struct_expr: ctx.intern_expr(expr),
                     member_name: ident,
                     span,
                     id,
-                }));
+                });
                 Ok(Expr::new(kind, span, id))
             }
             TokenKind::Arrow => {
-                let ident = self.parse_ident(bump)?;
+                let ident = self.parse_ident(ctx)?;
                 let span = Span::new(expr.span.start, ident.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::PointerMemberAccess(PointerMemberAccess {
-                    struct_ptr_expr: expr,
+                let kind = ExprKind::PointerMemberAccess(PointerMemberAccess {
+                    struct_ptr_expr: ctx.intern_expr(expr),
                     member_name: ident,
                     span,
                     id,
-                }));
+                });
                 Ok(Expr::new(kind, span, id))
             }
             TokenKind::DoublePlus | TokenKind::DoubleMinus => {
                 let span = Span::new(expr.span.start, op.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::PostfixOp(PostfixOp {
+                let kind = ExprKind::PostfixOp(PostfixOp {
                     kind: if op.kind == TokenKind::DoublePlus {
                         PostfixOpKind::Increment
                     } else {
                         PostfixOpKind::Decrement
                     },
-                    expr,
+                    expr: ctx.intern_expr(expr),
                     span,
                     id,
-                }));
+                });
                 Ok(Expr::new(kind, span, id))
             }
             TokenKind::Keyword(KeywordKind::As) => {
-                let typ = self.parse_type(bump)?;
+                let typ = self.parse_type_node(ctx)?;
                 let span = Span::new(expr.span.start, typ.span.end);
                 let id = self.next_id();
-                let kind = bump.alloc(ExprKind::Cast(Cast {
+                let kind = ExprKind::Cast(Cast {
                     to_type: typ,
-                    expr,
+                    expr: ctx.intern_expr(expr),
                     span,
                     id,
-                }));
+                });
                 Ok(Expr::new(kind, span, id))
             }
             _ => unreachable!(),
@@ -1135,580 +1124,540 @@ mod tests {
     use super::*;
     #[macro_use]
     mod utils {
-        use bumpalo::collections::CollectIn;
+        use std::cell::{RefCell, RefMut};
 
         use super::*;
-        pub fn lex(s: &str) -> Vec<Token> {
-            let lexed = Lexer::lex(s);
+        pub fn lex(s: &str, ctx: &mut Context) -> Vec<Token> {
+            let lexed = Lexer::lex(s, ctx);
             assert!(!lexed.has_errors());
             lexed.tokens
         }
 
         thread_local! {
-            static BUMP: &'static Bump = Box::leak(Box::new(Bump::new()));
+            static CTX: &'static RefCell<Context> = Box::leak(Box::new(RefCell::new(Context::new())));
         }
 
-        pub fn bump() -> &'static Bump {
-            BUMP.with(|b| *b)
+        #[track_caller]
+        pub fn ctx() -> RefMut<'static, Context> {
+            CTX.with(|ctx| ctx.borrow_mut())
         }
-        pub fn num(n: i64) -> Expr<'static> {
+
+        pub fn num(n: i64) -> Expr {
             Expr::new(
-                bump().alloc(ExprKind::Int(Int {
+                ExprKind::Int(Int {
                     lit: n,
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn a() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("a"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn a() -> Expr {
+            Expr::new(ExprKind::Ident(ident("a")), Span::empty(), NodeId(0))
         }
-        pub fn b() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("b"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn b() -> Expr {
+            Expr::new(ExprKind::Ident(ident("b")), Span::empty(), NodeId(0))
         }
-        pub fn c() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("c"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn c() -> Expr {
+            Expr::new(ExprKind::Ident(ident("c")), Span::empty(), NodeId(0))
         }
-        pub fn d() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("d"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn d() -> Expr {
+            Expr::new(ExprKind::Ident(ident("d")), Span::empty(), NodeId(0))
         }
-        pub fn e() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("e"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn e() -> Expr {
+            Expr::new(ExprKind::Ident(ident("e")), Span::empty(), NodeId(0))
         }
-        pub fn f() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("f"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn f() -> Expr {
+            Expr::new(ExprKind::Ident(ident("f")), Span::empty(), NodeId(0))
         }
-        pub fn g() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("g"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn g() -> Expr {
+            Expr::new(ExprKind::Ident(ident("g")), Span::empty(), NodeId(0))
         }
-        pub fn i() -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::Ident(ident("i"))),
-                Span::empty(),
-                NodeId(0),
-            )
+        pub fn i() -> Expr {
+            Expr::new(ExprKind::Ident(ident("i")), Span::empty(), NodeId(0))
         }
-        pub fn ident(s: &str) -> Ident<'_> {
+        pub fn ident(s: &str) -> Ident {
             Ident {
-                ident: s,
+                ident: ctx().intern_symbol(s),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn ptr(pointee: Type<'static>) -> Type<'static> {
-            Type::new(
-                bump().alloc(TypeKind::Ptr {
-                    pointee,
-                    noalias: false,
-                }),
-                Span::empty(),
-                NodeId(0),
-            )
-        }
-        pub fn noalias_ptr(pointee: Type<'static>) -> Type<'static> {
-            Type::new(
-                bump().alloc(TypeKind::Ptr {
-                    pointee,
-                    noalias: true,
-                }),
-                Span::empty(),
-                NodeId(0),
-            )
-        }
-        pub fn void() -> Type<'static> {
-            Type::new(&TypeKind::Void, Span::empty(), NodeId(0))
-        }
-        pub fn int() -> Type<'static> {
-            Type::new(&TypeKind::Int, Span::empty(), NodeId(0))
-        }
-        pub fn struct_(s: &'static str) -> Type<'static> {
-            Type::new(
-                bump().alloc(TypeKind::Struct { name: ident(s) }),
-                Span::empty(),
-                NodeId(0),
-            )
-        }
-        pub fn array(t: Type<'static>, len: i64) -> Type<'static> {
-            Type::new(
-                bump().alloc(TypeKind::Array {
-                    element_type: t,
-                    size: len,
-                }),
-                Span::empty(),
-                NodeId(0),
-            )
-        }
-        pub fn func_ptr(
-            param_types: Vec<Type<'static>>,
-            return_type: Option<Type<'static>>,
-        ) -> Type<'static> {
-            let mut v = BumpVec::new_in(bump());
-            for i in param_types {
-                v.push(i.clone())
+        pub fn ptr(pointee: Type) -> Type {
+            Type::Ptr {
+                pointee: ctx().intern_type(pointee),
+                noalias: false,
             }
-            Type::new(
-                bump().alloc(TypeKind::FuncPtr {
-                    return_type,
-                    param_types: v,
+        }
+        pub fn noalias_ptr(pointee: Type) -> Type {
+            Type::Ptr {
+                pointee: ctx().intern_type(pointee),
+                noalias: true,
+            }
+        }
+        pub fn void() -> Type {
+            Type::Void
+        }
+        pub fn int() -> Type {
+            Type::Int
+        }
+        pub fn struct_(s: Ident) -> Type {
+            Type::Struct { name: s.ident }
+        }
+        pub fn array(t: Type, len: i64) -> Type {
+            Type::Array {
+                element_type: ctx().intern_type(t),
+                len,
+            }
+        }
+        pub fn typenode(t: Type, ctx: &mut Context) -> TypeNode {
+            TypeNode {
+                inner: ctx.intern_type(t),
+                span: Span::empty(),
+                id: NodeId(1),
+            }
+        }
+        pub fn func_ptr(param_types: Vec<Type>, return_type: Option<Type>) -> Type {
+            let mut v = TinyVec::new();
+            let ctx = &mut ctx();
+            for i in param_types {
+                v.push(ctx.intern_type(i))
+            }
+            let return_type = return_type.map(|t| ctx.intern_type(t));
+            Type::FuncPtr {
+                return_type,
+                param_types: v,
+            }
+        }
+        pub fn cast(from: Expr, to: Type) -> Expr {
+            let mut ctx = ctx();
+            Expr::new(
+                ExprKind::Cast(Cast {
+                    to_type: typenode(to, &mut ctx),
+                    expr: ctx.intern_expr(from),
+                    span: Span::empty(),
+                    id: NodeId(0),
                 }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn cast(from: Expr<'static>, to: Type<'static>) -> Expr<'static> {
+        pub fn binop(lhs: Expr, rhs: Expr, op_type: BinaryOpKind) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::Cast(Cast {
-                    to_type: to,
-                    expr: from,
-                    span: Span::empty(),
-                    id: NodeId(0),
-                })),
-                Span::empty(),
-                NodeId(0),
-            )
-        }
-        pub fn binop(
-            lhs: Expr<'static>,
-            rhs: Expr<'static>,
-            op_type: BinaryOpKind,
-        ) -> Expr<'static> {
-            Expr::new(
-                bump().alloc(ExprKind::BinaryOp(BinaryOp {
+                ExprKind::BinaryOp(BinaryOp {
                     kind: op_type,
-                    left: lhs,
-                    right: rhs,
+                    left: ctx.intern_expr(lhs),
+                    right: ctx.intern_expr(rhs),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn prefix_op(expr: Expr<'static>, op_type: PrefixOpKind) -> Expr<'static> {
+        pub fn prefix_op(expr: Expr, op_type: PrefixOpKind) -> Expr {
             Expr::new(
-                bump().alloc(ExprKind::PrefixOp(PrefixOp {
+                ExprKind::PrefixOp(PrefixOp {
                     kind: op_type,
-                    expr,
+                    expr: ctx().intern_expr(expr),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn postfix_op(expr: Expr<'static>, op_type: PostfixOpKind) -> Expr<'static> {
+        pub fn postfix_op(expr: Expr, op_type: PostfixOpKind) -> Expr {
             Expr::new(
-                bump().alloc(ExprKind::PostfixOp(PostfixOp {
+                ExprKind::PostfixOp(PostfixOp {
                     kind: op_type,
-                    expr,
+                    expr: ctx().intern_expr(expr),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn ternary(
-            condition: Expr<'static>,
-            true_branch: Expr<'static>,
-            false_branch: Expr<'static>,
-        ) -> Expr<'static> {
+        pub fn ternary(condition: Expr, true_branch: Expr, false_branch: Expr) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::Ternary(Ternary {
-                    condition,
-                    true_branch,
-                    false_branch,
+                ExprKind::Ternary(Ternary {
+                    condition: ctx.intern_expr(condition),
+                    true_branch: ctx.intern_expr(true_branch),
+                    false_branch: ctx.intern_expr(false_branch),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn func_call(func_expr: Expr<'static>, args: Vec<Expr<'static>>) -> Expr<'static> {
+        pub fn func_call(func_expr: Expr, args: Vec<Expr>) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::FunctionCall(FunctionCall {
-                    func_expr,
-                    args: args.into_iter().collect_in(bump()),
+                ExprKind::FunctionCall(FunctionCall {
+                    func_expr: ctx.intern_expr(func_expr),
+                    args: args.into_iter().map(|e| ctx.intern_expr(e)).collect(),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn member_access(expr: Expr<'static>, member: &'static str) -> Expr<'static> {
+        pub fn member_access(expr: Expr, member: Ident) -> Expr {
             Expr::new(
-                bump().alloc(ExprKind::MemberAccess(MemberAccess {
-                    struct_expr: expr,
-                    member_name: ident(member),
+                ExprKind::MemberAccess(MemberAccess {
+                    struct_expr: ctx().intern_expr(expr),
+                    member_name: member,
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn pointer_member_access(expr: Expr<'static>, member: &'static str) -> Expr<'static> {
+        pub fn pointer_member_access(expr: Expr, member: Ident) -> Expr {
             Expr::new(
-                bump().alloc(ExprKind::PointerMemberAccess(PointerMemberAccess {
-                    struct_ptr_expr: expr,
-                    member_name: ident(member),
+                ExprKind::PointerMemberAccess(PointerMemberAccess {
+                    struct_ptr_expr: ctx().intern_expr(expr),
+                    member_name: member,
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn array_index(expr: Expr<'static>, index: Expr<'static>) -> Expr<'static> {
+        pub fn array_index(expr: Expr, index: Expr) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::ArrayIndex(ArrayIndex {
-                    array: expr,
-                    index,
+                ExprKind::ArrayIndex(ArrayIndex {
+                    array: ctx.intern_expr(expr),
+                    index: ctx.intern_expr(index),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn sizeof(typ: Type<'static>) -> Expr<'static> {
+        pub fn sizeof(typ: Type) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::SizeOfType(SizeOfType {
-                    typ,
+                ExprKind::SizeOfType(SizeOfType {
+                    typ: typenode(typ, &mut ctx),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn nullptr() -> Expr<'static> {
+        pub fn nullptr() -> Expr {
             Expr::new(
-                bump().alloc(ExprKind::Nullptr(Nullptr {
+                ExprKind::Nullptr(Nullptr {
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn get_type(s: &str) -> Type<'static> {
-            let tokens = lex(s);
+        pub fn get_type(s: &str) -> Type {
+            let mut ctx = ctx();
+            let tokens = lex(s, &mut ctx);
             let mut parser = Parser::new(&tokens);
-            let output = parser.parse_type(bump()).unwrap();
+            let output = parser.parse_type(&mut ctx).unwrap();
             assert!(parser.is_at_end(), "{parser:?}");
-            output
+            output.0
         }
-        pub fn add(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn add(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Add)
         }
-        pub fn sub(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn sub(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Sub)
         }
-        pub fn mul(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn mul(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Mul)
         }
-        pub fn div(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn div(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Div)
         }
-        pub fn eq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn eq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Eq)
         }
-        pub fn gt(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn gt(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Greater)
         }
-        pub fn lt(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn lt(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Less)
         }
-        pub fn geq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn geq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::GreaterOrEqual)
         }
-        pub fn leq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn leq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::LessOrEqual)
         }
-        pub fn noteq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn noteq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::NotEq)
         }
-        pub fn and(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn and(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::And)
         }
-        pub fn or(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn or(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Or)
         }
-        pub fn bitand(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn bitand(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::BitAnd)
         }
-        pub fn bitor(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn bitor(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::BitOr)
         }
-        pub fn xor(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn xor(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Xor)
         }
-        pub fn mod_(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn mod_(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Mod)
         }
-        pub fn addeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn addeq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::AddAssign)
         }
-        pub fn subeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn subeq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::SubAssign)
         }
-        pub fn muleq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn muleq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::MulAssign)
         }
-        pub fn diveq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn diveq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::DivAssign)
         }
-        pub fn andeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn andeq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::BitAndAssign)
         }
-        pub fn oreq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn oreq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::BitOrAssign)
         }
-        pub fn xoreq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn xoreq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::XorAssign)
         }
-        pub fn modeq(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn modeq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::ModAssign)
         }
-        pub fn assign(lhs: Expr<'static>, rhs: Expr<'static>) -> Expr<'static> {
+        pub fn assign(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Assign)
         }
-
-        pub fn prefix_increment(expr: Expr<'static>) -> Expr<'static> {
+        pub fn prefix_increment(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::Increment)
         }
-        pub fn prefix_decrement(expr: Expr<'static>) -> Expr<'static> {
+        pub fn prefix_decrement(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::Decrement)
         }
-        pub fn unary_plus(expr: Expr<'static>) -> Expr<'static> {
+        pub fn unary_plus(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::UnaryPlus)
         }
-        pub fn unary_minus(expr: Expr<'static>) -> Expr<'static> {
+        pub fn unary_minus(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::UnaryMinus)
         }
-        pub fn addr_of(expr: Expr<'static>) -> Expr<'static> {
+        pub fn addr_of(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::AddressOf)
         }
-        pub fn dereference(expr: Expr<'static>) -> Expr<'static> {
+        pub fn dereference(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::Dereference)
         }
-        pub fn not(expr: Expr<'static>) -> Expr<'static> {
+        pub fn not(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::Not)
         }
-        pub fn bitnot(expr: Expr<'static>) -> Expr<'static> {
+        pub fn bitnot(expr: Expr) -> Expr {
             prefix_op(expr, PrefixOpKind::BitNot)
         }
 
-        pub fn suffix_increment(expr: Expr<'static>) -> Expr<'static> {
+        pub fn suffix_increment(expr: Expr) -> Expr {
             postfix_op(expr, PostfixOpKind::Increment)
         }
-        pub fn suffix_decrement(expr: Expr<'static>) -> Expr<'static> {
+        pub fn suffix_decrement(expr: Expr) -> Expr {
             postfix_op(expr, PostfixOpKind::Decrement)
         }
-        pub fn struct_init(
-            name: Ident<'static>,
-            inits: Vec<(Ident<'static>, Expr<'static>)>,
-        ) -> Expr<'static> {
+        pub fn struct_init(name: Ident, inits: Vec<(Ident, Expr)>) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::StructInit(StructInit {
+                ExprKind::StructInit(StructInit {
                     name,
-                    field_inits: inits.into_iter().collect_in(bump()),
+                    field_inits: inits
+                        .into_iter()
+                        .map(|(i, e)| (i, ctx.intern_expr(e)))
+                        .collect(),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn array_init(exprs: Vec<Expr<'static>>) -> Expr<'static> {
+        pub fn array_init(exprs: Vec<Expr>) -> Expr {
+            let mut ctx = ctx();
             Expr::new(
-                bump().alloc(ExprKind::ArrayInit(ArrayInit {
-                    elements: exprs.into_iter().collect_in(bump()),
+                ExprKind::ArrayInit(ArrayInit {
+                    elements: exprs.into_iter().map(|e| ctx.intern_expr(e)).collect(),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 Span::empty(),
                 NodeId(0),
             )
         }
-        pub fn return_stmt(r: Option<Expr<'static>>) -> Stmt<'static> {
+        pub fn return_stmt(r: Option<Expr>) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: bump().alloc(StmtKind::ReturnStmt(ReturnStmt {
-                    value: r,
+                kind: StmtKind::ReturnStmt(ReturnStmt {
+                    value: r.map(|e| ctx.intern_expr(e)),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn block(stmts: Vec<Stmt<'static>>) -> Stmt<'static> {
+        pub fn block(stmts: Vec<Stmt>) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: bump().alloc(StmtKind::Block(Block {
-                    body: stmts.into_iter().collect_in(bump()),
+                kind: StmtKind::Block(Block {
+                    body: stmts.into_iter().map(|s| ctx.intern_stmt(s)).collect(),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn bblock(stmts: Vec<Stmt<'static>>) -> Block<'static> {
+        pub fn bblock(stmts: Vec<Stmt>) -> Block {
+            let mut ctx = ctx();
             Block {
-                body: stmts.into_iter().collect_in(bump()),
+                body: stmts.into_iter().map(|s| ctx.intern_stmt(s)).collect(),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn break_() -> Stmt<'static> {
+        pub fn break_() -> Stmt {
             Stmt {
-                kind: bump().alloc(StmtKind::Break(Break {
+                kind: StmtKind::Break(Break {
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn continue_() -> Stmt<'static> {
+        pub fn continue_() -> Stmt {
             Stmt {
-                kind: bump().alloc(StmtKind::Continue(Continue {
+                kind: StmtKind::Continue(Continue {
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn if_stmt(
-            condition: Expr<'static>,
-            then_branch: Stmt<'static>,
-            else_branch: Option<Stmt<'static>>,
-        ) -> Stmt<'static> {
+        pub fn if_stmt(condition: Expr, then_branch: Stmt, else_branch: Option<Stmt>) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: bump().alloc(StmtKind::IfStmt(IfStmt {
-                    condition,
-                    then_branch,
-                    else_branch,
+                kind: StmtKind::IfStmt(IfStmt {
+                    condition: ctx.intern_expr(condition),
+                    then_branch: ctx.intern_stmt(then_branch),
+                    else_branch: else_branch.map(|s| ctx.intern_stmt(s)),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn while_loop(condition: Expr<'static>, body: Stmt<'static>) -> Stmt<'static> {
+        pub fn while_loop(condition: Expr, body: Stmt) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: bump().alloc(StmtKind::WhileLoop(WhileLoop {
-                    condition,
-                    body,
+                kind: StmtKind::WhileLoop(WhileLoop {
+                    condition: ctx.intern_expr(condition),
+                    body: ctx.intern_stmt(body),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
         pub fn for_loop(
-            init: Option<Stmt<'static>>,
-            condition: Option<Expr<'static>>,
-            post: Option<Expr<'static>>,
-            body: Stmt<'static>,
-        ) -> Stmt<'static> {
+            init: Option<Stmt>,
+            condition: Option<Expr>,
+            post: Option<Expr>,
+            body: Stmt,
+        ) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: bump().alloc(StmtKind::ForLoop(ForLoop {
-                    init,
-                    condition,
-                    post,
-                    body,
+                kind: StmtKind::ForLoop(ForLoop {
+                    init: init.map(|s| ctx.intern_stmt(s)),
+                    condition: condition.map(|e| ctx.intern_expr(e)),
+                    post: post.map(|e| ctx.intern_expr(e)),
+                    body: ctx.intern_stmt(body),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn exprstmt(expr: Expr<'static>) -> Stmt<'static> {
+        pub fn exprstmt(expr: Expr) -> Stmt {
             Stmt {
-                kind: bump().alloc(StmtKind::Expr(expr)),
+                kind: StmtKind::Expr(expr),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn variable_decl(
-            name: Ident<'static>,
-            typ: Type<'static>,
-            init: Option<Expr<'static>>,
-        ) -> Stmt<'static> {
+        pub fn variable_decl(name: Ident, typ: Type, init: Option<Expr>) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: bump().alloc(StmtKind::VariableDeclaration(VariableDeclaration {
-                    var_type: typ,
+                kind: StmtKind::VariableDeclaration(VariableDeclaration {
+                    var_type: typenode(typ, &mut ctx),
                     name,
-                    init_value: init,
+                    init_value: init.map(|e| ctx.intern_expr(e)),
                     span: Span::empty(),
                     id: NodeId(0),
-                })),
+                }),
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
         pub fn func_decl(
-            name: Ident<'static>,
-            params: Vec<(Ident<'static>, Type<'static>)>,
-            return_type: Option<Type<'static>>,
-            body: Block<'static>,
-        ) -> FunctionDeclaration<'static> {
+            name: Ident,
+            params: Vec<(Ident, Type)>,
+            return_type: Option<Type>,
+            body: Block,
+        ) -> FunctionDeclaration {
             use utils::*;
+            let mut ctx = ctx();
             FunctionDeclaration {
-                return_type,
+                return_type: return_type.map(|t| typenode(t, &mut ctx)),
                 name,
-                params: params.into_iter().collect_in(bump()),
+                params: params
+                    .into_iter()
+                    .map(|(i, t)| (i, typenode(t, &mut ctx)))
+                    .collect(),
                 body,
                 span: Span::empty(),
                 id: NodeId(0),
             }
         }
-        pub fn struct_decl(
-            name: Ident<'static>,
-            fields: Vec<(Ident<'static>, Type<'static>)>,
-        ) -> StructDeclaration<'static> {
+        pub fn struct_decl(name: Ident, fields: Vec<(Ident, Type)>) -> StructDeclaration {
             use utils::*;
+            let mut ctx = ctx();
             StructDeclaration {
                 name,
-                fields: fields.into_iter().collect_in(bump()),
+                fields: fields
+                    .into_iter()
+                    .map(|(i, t)| (i, typenode(t, &mut ctx)))
+                    .collect(),
                 span: Span::empty(),
                 id: NodeId(0),
             }
@@ -1719,19 +1668,21 @@ mod tests {
     fn test_number_parse() {
         fn compare(s: &str, expected: i64) {
             use utils::*;
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
-            let atom = parser.parse_atom(bump()).unwrap().unwrap();
+            let atom = parser.parse_atom(&mut ctx).unwrap().unwrap();
             let ExprKind::Int(Int { lit: parsed, .. }) = atom.kind else {
                 unreachable!();
             };
-            assert_eq!(*parsed, expected)
+            assert_eq!(parsed, expected)
         }
         fn assert_fail(s: &str) {
             use utils::*;
-            let tokens = lex(s);
+            let mut ctx = ctx();
+            let tokens = lex(s, &mut ctx);
             let mut parser = Parser::new(&tokens);
-            let res = parser.parse_atom(bump()).is_err();
+            let res = parser.parse_atom(&mut ctx).is_err();
             assert!(res || !parser.is_at_end() || !parser.errors.is_empty());
         }
         compare("9223372036854775807", 9223372036854775807);
@@ -1742,12 +1693,13 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_types(s: &str, expected: Type<'_>) {
+    fn compare_types(s: &str, expected: Type) {
         use utils::*;
-        let tokens = lex(s);
+        let mut ctx = ctx();
+        let tokens = lex(s, &mut ctx);
         let mut parser = Parser::new(&tokens);
-        let parsed = parser.parse_type(bump());
-        let typ = match parsed {
+        let parsed = parser.parse_type(&mut ctx);
+        let (typ, _span) = match parsed {
             Ok(t) => t,
             Err(_e) => {
                 panic!("{s} did not parse properly");
@@ -1771,19 +1723,21 @@ mod tests {
         compare_types("[int; 0]", array(int(), 0));
         compare_types("[*int; 1]", array(ptr(int()), 1));
         compare_types("[[int; 1]; 1]", array(array(int(), 1), 1));
-        compare_types("Something", struct_("Something"));
-        compare_types("[Something; 1]", array(struct_("Something"), 1));
+        compare_types("Something", struct_(ident("Something")));
+        compare_types("[Something; 1]", array(struct_(ident("Something")), 1));
         compare_types("[int; 2555555]", array(int(), 2555555));
-        compare_types("**Something", ptr(ptr(struct_("Something"))));
+        compare_types("**Something", ptr(ptr(struct_(ident("Something")))));
         compare_types("fn()", func_ptr(Vec::new(), None));
         compare_types("*fn()", ptr(func_ptr(Vec::new(), None)));
         compare_types("fn(int)", func_ptr(vec![int()], None));
         compare_types("noalias *int", noalias_ptr(int()));
         compare_types("noalias * noalias *int", noalias_ptr(noalias_ptr(int())));
         compare_types("noalias *void", noalias_ptr(void()));
-        compare_types("noalias *SomeStruct", noalias_ptr(struct_("SomeStruct")));
+        compare_types(
+            "noalias *SomeStruct",
+            noalias_ptr(struct_(ident("SomeStruct"))),
+        );
         compare_types("noalias *[int; 255]", noalias_ptr(array(int(), 255)));
-        dbg!(noalias_ptr(ptr(int())));
         compare_types("noalias **int", noalias_ptr(ptr(int())));
         compare_types("* noalias *int", ptr(noalias_ptr(int())));
 
@@ -1793,20 +1747,23 @@ mod tests {
         );
         compare_types(
             "fn(int, int) -> SomeStruct",
-            func_ptr(vec![int(), int()], Some(struct_("SomeStruct"))),
+            func_ptr(vec![int(), int()], Some(struct_(ident("SomeStruct")))),
         );
         compare_types(
             "fn(int, int) -> ***SomeStruct",
             func_ptr(
                 vec![int(), int()],
-                Some(ptr(ptr(ptr(struct_("SomeStruct"))))),
+                Some(ptr(ptr(ptr(struct_(ident("SomeStruct")))))),
             ),
         );
         compare_types(
             "fn(SomeStruct, SomeOtherStruct) -> SomeStruct",
             func_ptr(
-                vec![struct_("SomeStruct"), struct_("SomeOtherStruct")],
-                Some(struct_("SomeStruct")),
+                vec![
+                    struct_(ident("SomeStruct")),
+                    struct_(ident("SomeOtherStruct")),
+                ],
+                Some(struct_(ident("SomeStruct"))),
             ),
         );
         compare_types(
@@ -1860,22 +1817,24 @@ mod tests {
             "Something*",
         ];
         for s in failing_tests {
-            let tokens = lex(s);
+            let mut ctx = ctx();
+            let tokens = lex(s, &mut ctx);
             let mut parser = Parser::new(&tokens);
-            let res = parser.parse_type(bump()).is_err();
+            let res = parser.parse_type_node(&mut ctx).is_err();
             assert!(res || !parser.is_at_end() || !parser.errors.is_empty());
         }
     }
 
     #[track_caller]
-    fn compare_exprs(s: &str, expected: Expr<'_>) {
+    fn compare_exprs(s: &str, expected: Expr) {
         use utils::*;
-        let tokens = lex(s);
+        let mut ctx = ctx();
+        let tokens = lex(s, &mut ctx);
         let mut parser = Parser::new(&tokens);
-        let parsed = parser.parse_expr(bump()).expect("Should parse correctly");
+        let parsed = parser.parse_expr(&mut ctx).expect("Should parse correctly");
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -1918,8 +1877,8 @@ mod tests {
         compare_exprs("a--", suffix_decrement(a()));
         compare_exprs("c ? a : b", ternary(c(), a(), b()));
         compare_exprs("c(a,b)", func_call(c(), vec![a(), b()]));
-        compare_exprs("c.a", member_access(c(), "a"));
-        compare_exprs("c->a", pointer_member_access(c(), "a"));
+        compare_exprs("c.a", member_access(c(), ident("a")));
+        compare_exprs("c->a", pointer_member_access(c(), ident("a")));
         compare_exprs("a[b]", array_index(a(), b()));
         compare_exprs("sizeof(int)", sizeof(get_type("int")));
         compare_exprs("sizeof(**int)", sizeof(get_type("**int")));
@@ -1964,7 +1923,10 @@ mod tests {
         );
         compare_exprs(
             "c.a + b->c",
-            add(member_access(c(), "a"), pointer_member_access(b(), "c")),
+            add(
+                member_access(c(), ident("a")),
+                pointer_member_access(b(), ident("c")),
+            ),
         );
         compare_exprs("a[b + c]", array_index(a(), add(b(), c())));
         compare_exprs("sizeof(**int) + a", add(sizeof(get_type("**int")), a()));
@@ -2201,7 +2163,7 @@ mod tests {
                                     ternary(e(), mul(sizeof(get_type("int")), f()), g()),
                                 ),
                             ),
-                            cast(pointer_member_access(b(), "c"), get_type("int")),
+                            cast(pointer_member_access(b(), ident("c")), get_type("int")),
                         )),
                     ),
                     func_call(c(), vec![add(a(), b()), mul(b(), c())]),
@@ -2262,10 +2224,11 @@ mod tests {
             "sizeof(int*)",
         ];
         for s in failing_tests {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_expr(bump()).is_err()
+                parser.parse_expr(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2273,14 +2236,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_struct_init(s: &str, expected: Expr<'_>) {
+    fn compare_struct_init(s: &str, expected: Expr) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_struct_init(bump()).unwrap();
+        let parsed = parser.parse_struct_init(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2332,10 +2296,11 @@ mod tests {
             "struct MyStruct a: b, c: d}",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_struct_init(bump()).is_err()
+                parser.parse_struct_init(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2343,14 +2308,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_array_init(s: &str, expected: Expr<'_>) {
+    fn compare_array_init(s: &str, expected: Expr) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_array_init(bump()).unwrap();
+        let parsed = parser.parse_array_init(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2365,7 +2331,7 @@ mod tests {
                 ternary(a(), b(), c()),
                 add(c(), d()),
                 add(d(), e()),
-                pointer_member_access(f(), "d"),
+                pointer_member_access(f(), ident("d")),
             ]),
         );
         compare_array_init(
@@ -2392,10 +2358,11 @@ mod tests {
         use utils::*;
         let fails = ["[0; 1]", "[0 1]", "[0, 1}", "[}"];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_array_init(bump()).is_err()
+                parser.parse_array_init(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2403,14 +2370,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_return(s: &str, expected: Stmt<'_>) {
+    fn compare_return(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_return_stmt(bump()).unwrap();
+        let parsed = parser.parse_return_stmt(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2433,14 +2401,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_while(s: &str, expected: Stmt<'_>) {
+    fn compare_while(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_while_loop(bump()).unwrap();
+        let parsed = parser.parse_while_loop(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2469,10 +2438,11 @@ mod tests {
             "while ()",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_while_loop(bump()).is_err()
+                parser.parse_while_loop(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2480,18 +2450,19 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_block(s: &str, expected: Stmt<'_>) {
+    fn compare_block(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
         let parsed = Stmt {
-            kind: bump().alloc(StmtKind::Block(parser.parse_block(bump()).unwrap())),
+            kind: StmtKind::Block(parser.parse_block(&mut ctx).unwrap()),
             span: Span::empty(),
             id: NodeId(0),
         };
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2539,10 +2510,11 @@ mod tests {
             "{{}",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_block(bump()).is_err()
+                parser.parse_block(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2550,14 +2522,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_if(s: &str, expected: Stmt<'_>) {
+    fn compare_if(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_if_stmt(bump()).unwrap();
+        let parsed = parser.parse_if_stmt(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2652,10 +2625,11 @@ mod tests {
             "if (a) {b;} else else {c;}",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_if_stmt(bump()).is_err()
+                parser.parse_if_stmt(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2663,14 +2637,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_for(s: &str, expected: Stmt<'_>) {
+    fn compare_for(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_for_loop(bump()).unwrap();
+        let parsed = parser.parse_for_loop(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2763,10 +2738,11 @@ mod tests {
             "for ({};;) {}",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_for_loop(bump()).is_err()
+                parser.parse_for_loop(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2774,20 +2750,19 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_vardecl(s: &str, expected: Stmt<'_>) {
+    fn compare_vardecl(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
         let parsed = Stmt {
-            kind: bump().alloc(StmtKind::VariableDeclaration(
-                parser.parse_variable_decl(bump()).unwrap(),
-            )),
+            kind: StmtKind::VariableDeclaration(parser.parse_variable_decl(&mut ctx).unwrap()),
             span: Span::empty(),
             id: NodeId(0),
         };
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2872,10 +2847,11 @@ mod tests {
             "let a: void* = nullptr",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_variable_decl(bump()).is_err()
+                parser.parse_variable_decl(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2883,14 +2859,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_funcdecl(s: &str, expected: FunctionDeclaration<'_>) {
+    fn compare_funcdecl(s: &str, expected: FunctionDeclaration) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_function_decl(bump()).unwrap();
+        let parsed = parser.parse_function_decl(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -2948,10 +2925,11 @@ mod tests {
             "fn f(a: int, b int) {}",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_function_decl(bump()).is_err()
+                parser.parse_function_decl(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2959,14 +2937,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_structdecl(s: &str, expected: StructDeclaration<'_>) {
+    fn compare_structdecl(s: &str, expected: StructDeclaration) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_struct_decl(bump()).unwrap();
+        let parsed = parser.parse_struct_decl(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -3017,10 +2996,11 @@ mod tests {
             "struct MyStruct {int a}",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_struct_decl(bump()).is_err()
+                parser.parse_struct_decl(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -3028,14 +3008,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_stmt(s: &str, expected: Stmt<'_>) {
+    fn compare_stmt(s: &str, expected: Stmt) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_stmt(bump()).unwrap();
+        let parsed = parser.parse_stmt(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -3077,10 +3058,11 @@ mod tests {
             "for (let i: int = 0; i < 10; i++) something",
         ];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_stmt(bump()).is_err()
+                parser.parse_stmt(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -3088,14 +3070,15 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_global_decl(s: &str, expected: GlobalDeclaration<'_>) {
+    fn compare_global_decl(s: &str, expected: GlobalDeclaration) {
         use utils::*;
-        let lexed = lex(s);
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_global_decl(bump()).unwrap();
+        let parsed = parser.parse_global_decl(&mut ctx).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
-        assert_eq!(parsed, expected);
+        assert!(parsed.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -3128,13 +3111,19 @@ mod tests {
                 id: NodeId(0),
             },
         );
+        let typ = get_type("int");
+        let ident = ident("a");
+        let mut ctx = ctx();
+        let typenode = typenode(typ, &mut ctx);
+        let init_value = Some(ctx.intern_expr(num(5)));
+        drop(ctx);
         compare_global_decl(
             "let a: int = 5;",
             GlobalDeclaration {
                 kind: GlobalDeclarationKind::Variable(VariableDeclaration {
-                    var_type: get_type("int"),
-                    name: ident("a"),
-                    init_value: Some(num(5)),
+                    var_type: typenode,
+                    name: ident,
+                    init_value,
                     span: Span::empty(),
                     id: NodeId(0),
                 }),
@@ -3149,10 +3138,11 @@ mod tests {
         use utils::*;
         let fails = ["fn f()", "fn f();", "let a: int = 5"];
         for s in fails {
-            let lexed = lex(s);
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_global_decl(bump()).is_err()
+                parser.parse_global_decl(&mut ctx).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -3160,12 +3150,13 @@ mod tests {
     }
 
     #[track_caller]
-    fn compare_program(s: &str, expected: Program<'_>) {
+    fn compare_program(s: &str, expected: Program) {
         use utils::*;
-        let lexed = lex(s);
-        let parsed = Parser::parse(&lexed, bump());
+        let mut ctx = ctx();
+        let lexed = lex(s, &mut ctx);
+        let parsed = Parser::parse(&lexed, &mut ctx);
         assert!(!parsed.has_errors());
-        assert_eq!(parsed.program, expected);
+        assert!(parsed.program.ctx_eq(&expected, &ctx));
     }
 
     #[test]
@@ -3181,22 +3172,23 @@ mod tests {
         let StmtKind::VariableDeclaration(var_decl) = var_decl.kind else {
             unreachable!();
         };
-        let mut v = BumpVec::new_in(bump());
-        v.push(GlobalDeclaration {
-            kind: GlobalDeclarationKind::Function(func),
-            span: Span::empty(),
-            id: NodeId(0),
-        });
-        v.push(GlobalDeclaration {
-            kind: GlobalDeclarationKind::Struct(struct_),
-            span: Span::empty(),
-            id: NodeId(0),
-        });
-        v.push(GlobalDeclaration {
-            kind: GlobalDeclarationKind::Variable(var_decl.clone()),
-            span: Span::empty(),
-            id: NodeId(0),
-        });
+        let v = vec![
+            GlobalDeclaration {
+                kind: GlobalDeclarationKind::Function(func),
+                span: Span::empty(),
+                id: NodeId(0),
+            },
+            GlobalDeclaration {
+                kind: GlobalDeclarationKind::Struct(struct_),
+                span: Span::empty(),
+                id: NodeId(0),
+            },
+            GlobalDeclaration {
+                kind: GlobalDeclarationKind::Variable(var_decl.clone()),
+                span: Span::empty(),
+                id: NodeId(0),
+            },
+        ];
         let program = Program { decls: v };
         compare_program(
             "fn func() {} struct MyStruct {a: int} let b: *int = 5 as *int;",
@@ -3213,8 +3205,9 @@ mod tests {
             "let a: int = 5",
         ];
         for s in fails {
-            let lexed = lex(s);
-            let parsed = Parser::parse(&lexed, bump());
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
+            let parsed = Parser::parse(&lexed, &mut ctx);
             assert!(parsed.has_errors());
         }
     }

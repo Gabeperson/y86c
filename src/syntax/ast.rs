@@ -1,142 +1,216 @@
-use crate::common::span::Span;
-use bumpalo::collections::Vec;
+use crate::{
+    common::span::Span,
+    syntax::context::{Context, ExprId, StmtId, Symbol, TypeId},
+};
+use tinyvec::TinyVec;
 
-#[derive(Clone, Debug, Copy, Hash, PartialEq, Eq)]
-pub struct NodeId(pub u64);
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum TypeKind<'a> {
-    Void,
-    Int,
-    Ptr {
-        pointee: Type<'a>,
-        noalias: bool,
-    },
-    Struct {
-        name: Ident<'a>,
-    },
-    Array {
-        element_type: Type<'a>,
-        size: i64,
-    },
-    FuncPtr {
-        return_type: Option<Type<'a>>,
-        param_types: Vec<'a, Type<'a>>,
-    },
-    Error,
+pub trait CtxEq {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool;
 }
 
-impl TypeKind<'_> {
-    pub fn is_error(&self) -> bool {
-        *self == TypeKind::Error
+impl<T: CtxEq> CtxEq for [T] {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.len() == other.len() && self.iter().zip(other).all(|(a, b)| a.ctx_eq(b, ctx))
+    }
+}
+impl<T: CtxEq> CtxEq for Option<T> {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        match (self, other) {
+            (None, None) => true,
+            (Some(lhs), Some(rhs)) => lhs.ctx_eq(rhs, ctx),
+            _ => false,
+        }
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Type<'a> {
-    pub inner: &'a TypeKind<'a>,
+impl CtxEq for TypeId {
+    fn ctx_eq(&self, other: &Self, _ctx: &Context) -> bool {
+        self == other
+    }
+}
+impl CtxEq for Symbol {
+    fn ctx_eq(&self, other: &Self, _ctx: &Context) -> bool {
+        self == other
+    }
+}
+impl CtxEq for ExprId {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        ctx.get_expr(*self).ctx_eq(ctx.get_expr(*other), ctx)
+    }
+}
+impl CtxEq for StmtId {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        ctx.get_stmt(*self).ctx_eq(ctx.get_stmt(*other), ctx)
+    }
+}
+impl<A: CtxEq, B: CtxEq> CtxEq for (A, B) {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.0.ctx_eq(&other.0, ctx) && self.1.ctx_eq(&other.1, ctx)
+    }
+}
+
+#[derive(Clone, Debug, Copy, Hash, PartialEq, Eq)]
+pub struct NodeId(pub u64);
+
+impl Default for NodeId {
+    fn default() -> Self {
+        Self(u64::MAX)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub enum Type {
+    Void,
+    Int,
+    Ptr {
+        pointee: TypeId,
+        noalias: bool,
+    },
+    Struct {
+        name: Symbol,
+    },
+    Array {
+        element_type: TypeId,
+        len: i64,
+    },
+    FuncPtr {
+        return_type: Option<TypeId>,
+        param_types: TinyVec<[TypeId; 5]>,
+    },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct TypeNode {
+    pub inner: TypeId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Type<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.inner == other.inner
+impl CtxEq for TypeNode {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.inner.ctx_eq(&other.inner, ctx)
     }
 }
 
-impl<'a> Type<'a> {
-    pub fn new(inner: &'a TypeKind<'a>, span: Span, id: NodeId) -> Self {
+impl TypeNode {
+    pub fn new(inner: TypeId, span: Span, id: NodeId) -> Self {
         Self { inner, span, id }
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Expr<'a> {
-    pub kind: &'a ExprKind<'a>,
+#[derive(Debug, Clone, Default)]
+pub struct Expr {
+    pub kind: ExprKind,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Expr<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
+impl CtxEq for Expr {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.kind.ctx_eq(&other.kind, ctx)
     }
 }
 
-impl<'a> Expr<'a> {
-    pub fn new(kind: &'a ExprKind<'a>, span: Span, id: NodeId) -> Self {
+impl Expr {
+    pub fn new(kind: ExprKind, span: Span, id: NodeId) -> Self {
         Self { kind, span, id }
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum ExprKind<'a> {
+#[derive(Debug, Clone, Default)]
+pub enum ExprKind {
     Nullptr(Nullptr),
-    Cast(Cast<'a>),
-    Ident(Ident<'a>),
+    Cast(Cast),
+    Ident(Ident),
     Int(Int),
-    BinaryOp(BinaryOp<'a>),
-    PrefixOp(PrefixOp<'a>),
-    PostfixOp(PostfixOp<'a>),
-    Ternary(Ternary<'a>),
-    FunctionCall(FunctionCall<'a>),
-    ArrayIndex(ArrayIndex<'a>),
-    SizeOfType(SizeOfType<'a>),
-    StructInit(StructInit<'a>),
-    ArrayInit(ArrayInit<'a>),
-    MemberAccess(MemberAccess<'a>),
-    PointerMemberAccess(PointerMemberAccess<'a>),
+    BinaryOp(BinaryOp),
+    PrefixOp(PrefixOp),
+    PostfixOp(PostfixOp),
+    Ternary(Ternary),
+    FunctionCall(FunctionCall),
+    ArrayIndex(ArrayIndex),
+    SizeOfType(SizeOfType),
+    StructInit(StructInit),
+    ArrayInit(ArrayInit),
+    MemberAccess(MemberAccess),
+    PointerMemberAccess(PointerMemberAccess),
+    #[default]
     Error,
 }
 
-#[derive(Debug, Clone, Eq)]
+impl CtxEq for ExprKind {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        match (self, other) {
+            (Self::Nullptr(lhs), Self::Nullptr(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Cast(lhs), Self::Cast(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Ident(lhs), Self::Ident(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Int(lhs), Self::Int(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::BinaryOp(lhs), Self::BinaryOp(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::PrefixOp(lhs), Self::PrefixOp(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::PostfixOp(lhs), Self::PostfixOp(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Ternary(lhs), Self::Ternary(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::FunctionCall(lhs), Self::FunctionCall(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::ArrayIndex(lhs), Self::ArrayIndex(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::SizeOfType(lhs), Self::SizeOfType(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::StructInit(lhs), Self::StructInit(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::ArrayInit(lhs), Self::ArrayInit(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::MemberAccess(lhs), Self::MemberAccess(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::PointerMemberAccess(lhs), Self::PointerMemberAccess(rhs)) => {
+                lhs.ctx_eq(rhs, ctx)
+            }
+            _ => core::mem::discriminant(self) == core::mem::discriminant(other),
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
 pub struct Nullptr {
     pub span: Span,
     pub id: NodeId,
 }
 
-impl PartialEq for Nullptr {
-    fn eq(&self, _other: &Self) -> bool {
+impl CtxEq for Nullptr {
+    fn ctx_eq(&self, _other: &Self, _ctx: &Context) -> bool {
         true
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Cast<'a> {
-    pub to_type: Type<'a>,
-    pub expr: Expr<'a>,
+#[derive(Debug, Clone)]
+pub struct Cast {
+    pub to_type: TypeNode,
+    pub expr: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Cast<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.to_type == other.to_type && self.expr == other.expr
+impl CtxEq for Cast {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.to_type.ctx_eq(&other.to_type, ctx) && self.expr.ctx_eq(&other.expr, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Ident<'a> {
-    pub ident: &'a str,
+#[derive(Debug, Clone, Default)]
+pub struct Ident {
+    pub ident: Symbol,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Ident<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.ident == other.ident
+impl CtxEq for Ident {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.ident.ctx_eq(&other.ident, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone)]
 pub struct Int {
     pub lit: i64,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl PartialEq for Int {
-    fn eq(&self, other: &Self) -> bool {
+impl CtxEq for Int {
+    fn ctx_eq(&self, other: &Self, _ctx: &Context) -> bool {
         self.lit == other.lit
     }
 }
@@ -168,22 +242,24 @@ pub enum BinaryOpKind {
     ModAssign,
     Assign,
 }
-#[derive(Debug, Clone, Eq)]
-pub struct BinaryOp<'a> {
+#[derive(Debug, Clone)]
+pub struct BinaryOp {
     pub kind: BinaryOpKind,
-    pub left: Expr<'a>,
-    pub right: Expr<'a>,
+    pub left: ExprId,
+    pub right: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for BinaryOp<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.left == other.left && self.right == other.right
+impl CtxEq for BinaryOp {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.kind == other.kind
+            && self.left.ctx_eq(&other.left, ctx)
+            && self.right.ctx_eq(&other.right, ctx)
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PrefixOpKind {
     Increment,
     Decrement,
@@ -195,573 +271,620 @@ pub enum PrefixOpKind {
     BitNot,
 }
 
-impl PartialEq for PrefixOpKind {
-    fn eq(&self, other: &Self) -> bool {
-        core::mem::discriminant(self) == core::mem::discriminant(other)
-    }
-}
-
-#[derive(Debug, Clone, Eq)]
-pub struct PrefixOp<'a> {
+#[derive(Debug, Clone)]
+pub struct PrefixOp {
     pub kind: PrefixOpKind,
-    pub expr: Expr<'a>,
+    pub expr: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for PrefixOp<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.expr == other.expr
+impl CtxEq for PrefixOp {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.kind == other.kind && self.expr.ctx_eq(&other.expr, ctx)
     }
 }
-#[derive(Debug, Clone, Copy, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PostfixOpKind {
     Increment,
     Decrement,
 }
 
-impl PartialEq for PostfixOpKind {
-    fn eq(&self, other: &Self) -> bool {
-        core::mem::discriminant(self) == core::mem::discriminant(other)
-    }
-}
-
-#[derive(Debug, Clone, Eq)]
-pub struct PostfixOp<'a> {
+#[derive(Debug, Clone)]
+pub struct PostfixOp {
     pub kind: PostfixOpKind,
-    pub expr: Expr<'a>,
+    pub expr: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for PostfixOp<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind && self.expr == other.expr
+impl CtxEq for PostfixOp {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.kind == other.kind && self.expr.ctx_eq(&other.expr, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Ternary<'a> {
-    pub condition: Expr<'a>,
-    pub true_branch: Expr<'a>,
-    pub false_branch: Expr<'a>,
+#[derive(Debug, Clone)]
+pub struct Ternary {
+    pub condition: ExprId,
+    pub true_branch: ExprId,
+    pub false_branch: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Ternary<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.condition == other.condition
-            && self.true_branch == other.true_branch
-            && self.false_branch == other.false_branch
+impl CtxEq for Ternary {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.condition.ctx_eq(&other.condition, ctx)
+            && self.true_branch.ctx_eq(&other.true_branch, ctx)
+            && self.false_branch.ctx_eq(&other.false_branch, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct FunctionCall<'a> {
-    pub func_expr: Expr<'a>,
-    pub args: Vec<'a, Expr<'a>>,
+#[derive(Debug, Clone)]
+pub struct FunctionCall {
+    pub func_expr: ExprId,
+    pub args: TinyVec<[ExprId; 5]>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for FunctionCall<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.func_expr == other.func_expr && self.args == other.args
+impl CtxEq for FunctionCall {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.func_expr.ctx_eq(&other.func_expr, ctx) && self.args.ctx_eq(&other.args, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct ArrayIndex<'a> {
-    pub array: Expr<'a>,
-    pub index: Expr<'a>,
+#[derive(Debug, Clone)]
+pub struct ArrayIndex {
+    pub array: ExprId,
+    pub index: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for ArrayIndex<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.array == other.array && self.index == other.index
+impl CtxEq for ArrayIndex {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.array.ctx_eq(&other.array, ctx) && self.index.ctx_eq(&other.index, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct SizeOfType<'a> {
-    pub typ: Type<'a>,
+#[derive(Debug, Clone)]
+pub struct SizeOfType {
+    pub typ: TypeNode,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for SizeOfType<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.typ == other.typ
+impl CtxEq for SizeOfType {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.typ.ctx_eq(&other.typ, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct StructInit<'a> {
-    pub name: Ident<'a>,
-    pub field_inits: Vec<'a, (Ident<'a>, Expr<'a>)>,
+#[derive(Debug, Clone)]
+pub struct StructInit {
+    pub name: Ident,
+    pub field_inits: TinyVec<[(Ident, ExprId); 5]>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for StructInit<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.field_inits == other.field_inits
+impl CtxEq for StructInit {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.name.ctx_eq(&other.name, ctx) && self.field_inits.ctx_eq(&other.field_inits, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct ArrayInit<'a> {
-    pub elements: Vec<'a, Expr<'a>>,
+#[derive(Debug, Clone)]
+pub struct ArrayInit {
+    pub elements: TinyVec<[ExprId; 5]>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for ArrayInit<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.elements == other.elements
+impl CtxEq for ArrayInit {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.elements.ctx_eq(&other.elements, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct MemberAccess<'a> {
-    pub struct_expr: Expr<'a>,
-    pub member_name: Ident<'a>,
+#[derive(Debug, Clone)]
+pub struct MemberAccess {
+    pub struct_expr: ExprId,
+    pub member_name: Ident,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for MemberAccess<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.struct_expr == other.struct_expr && self.member_name == other.member_name
+impl CtxEq for MemberAccess {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.struct_expr.ctx_eq(&other.struct_expr, ctx)
+            && self.member_name.ctx_eq(&other.member_name, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct PointerMemberAccess<'a> {
-    pub struct_ptr_expr: Expr<'a>,
-    pub member_name: Ident<'a>,
+#[derive(Debug, Clone)]
+pub struct PointerMemberAccess {
+    pub struct_ptr_expr: ExprId,
+    pub member_name: Ident,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for PointerMemberAccess<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.struct_ptr_expr == other.struct_ptr_expr && self.member_name == other.member_name
+impl CtxEq for PointerMemberAccess {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.struct_ptr_expr.ctx_eq(&other.struct_ptr_expr, ctx)
+            && self.member_name.ctx_eq(&other.member_name, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Stmt<'a> {
-    pub kind: &'a StmtKind<'a>,
+#[derive(Debug, Clone)]
+pub struct Stmt {
+    pub kind: StmtKind,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Stmt<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
+impl CtxEq for Stmt {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.kind.ctx_eq(&other.kind, ctx)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum StmtKind<'a> {
-    Assert(Assert<'a>),
+#[derive(Debug, Clone)]
+pub enum StmtKind {
+    Assert(Assert),
     Break(Break),
     Continue(Continue),
-    Block(Block<'a>),
-    IfStmt(IfStmt<'a>),
-    WhileLoop(WhileLoop<'a>),
-    ForLoop(ForLoop<'a>),
-    ReturnStmt(ReturnStmt<'a>),
-    VariableDeclaration(VariableDeclaration<'a>),
-    Expr(Expr<'a>),
+    Block(Block),
+    IfStmt(IfStmt),
+    WhileLoop(WhileLoop),
+    ForLoop(ForLoop),
+    ReturnStmt(ReturnStmt),
+    VariableDeclaration(VariableDeclaration),
+    Expr(Expr),
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Assert<'a> {
-    pub condition: Expr<'a>,
+impl CtxEq for StmtKind {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        match (self, other) {
+            (Self::Assert(lhs), Self::Assert(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Break(lhs), Self::Break(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Continue(lhs), Self::Continue(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Block(lhs), Self::Block(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::IfStmt(lhs), Self::IfStmt(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::WhileLoop(lhs), Self::WhileLoop(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::ForLoop(lhs), Self::ForLoop(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::ReturnStmt(lhs), Self::ReturnStmt(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::VariableDeclaration(lhs), Self::VariableDeclaration(rhs)) => {
+                lhs.ctx_eq(rhs, ctx)
+            }
+            (Self::Expr(lhs), Self::Expr(rhs)) => lhs.ctx_eq(rhs, ctx),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Assert {
+    pub condition: ExprId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Assert<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.condition == other.condition
+impl CtxEq for Assert {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.condition.ctx_eq(&other.condition, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone)]
 pub struct Break {
     pub span: Span,
     pub id: NodeId,
 }
 
-impl PartialEq for Break {
-    fn eq(&self, _other: &Self) -> bool {
+impl CtxEq for Break {
+    fn ctx_eq(&self, _other: &Self, _ctx: &Context) -> bool {
         true
     }
 }
 
-#[derive(Debug, Clone, Eq)]
+#[derive(Debug, Clone)]
 pub struct Continue {
     pub span: Span,
     pub id: NodeId,
 }
 
-impl PartialEq for Continue {
-    fn eq(&self, _other: &Self) -> bool {
+impl CtxEq for Continue {
+    fn ctx_eq(&self, _other: &Self, _ctx: &Context) -> bool {
         true
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct Block<'a> {
-    pub body: Vec<'a, Stmt<'a>>,
+#[derive(Debug, Clone)]
+pub struct Block {
+    pub body: TinyVec<[StmtId; 5]>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for Block<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.body == other.body
+impl CtxEq for Block {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.body.ctx_eq(&other.body, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct IfStmt<'a> {
-    pub condition: Expr<'a>,
-    pub then_branch: Stmt<'a>,
-    pub else_branch: Option<Stmt<'a>>,
+#[derive(Debug, Clone)]
+pub struct IfStmt {
+    pub condition: ExprId,
+    pub then_branch: StmtId,
+    pub else_branch: Option<StmtId>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for IfStmt<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.condition == other.condition
-            && self.then_branch == other.then_branch
-            && self.else_branch == other.else_branch
+impl CtxEq for IfStmt {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.condition.ctx_eq(&other.condition, ctx)
+            && self.then_branch.ctx_eq(&other.then_branch, ctx)
+            && self.else_branch.ctx_eq(&other.else_branch, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct WhileLoop<'a> {
-    pub condition: Expr<'a>,
-    pub body: Stmt<'a>,
+#[derive(Debug, Clone)]
+pub struct WhileLoop {
+    pub condition: ExprId,
+    pub body: StmtId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for WhileLoop<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.condition == other.condition && self.body == other.body
+impl CtxEq for WhileLoop {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.condition.ctx_eq(&other.condition, ctx) && self.body.ctx_eq(&other.body, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct ForLoop<'a> {
-    pub init: Option<Stmt<'a>>,
-    pub condition: Option<Expr<'a>>,
-    pub post: Option<Expr<'a>>,
-    pub body: Stmt<'a>,
+#[derive(Debug, Clone)]
+pub struct ForLoop {
+    pub init: Option<StmtId>,
+    pub condition: Option<ExprId>,
+    pub post: Option<ExprId>,
+    pub body: StmtId,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for ForLoop<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.init == other.init
-            && self.condition == other.condition
-            && self.post == other.post
-            && self.body == other.body
+impl CtxEq for ForLoop {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.init.ctx_eq(&other.init, ctx)
+            && self.condition.ctx_eq(&other.condition, ctx)
+            && self.post.ctx_eq(&other.post, ctx)
+            && self.body.ctx_eq(&other.body, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct ReturnStmt<'a> {
-    pub value: Option<Expr<'a>>,
+#[derive(Debug, Clone)]
+pub struct ReturnStmt {
+    pub value: Option<ExprId>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for ReturnStmt<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.value == other.value
+impl CtxEq for ReturnStmt {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.value.ctx_eq(&other.value, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct VariableDeclaration<'a> {
-    pub var_type: Type<'a>,
-    pub name: Ident<'a>,
-    pub init_value: Option<Expr<'a>>,
+#[derive(Debug, Clone)]
+pub struct VariableDeclaration {
+    pub var_type: TypeNode,
+    pub name: Ident,
+    pub init_value: Option<ExprId>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for VariableDeclaration<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.var_type == other.var_type
-            && self.name == other.name
-            && self.init_value == other.init_value
+impl CtxEq for VariableDeclaration {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.var_type.ctx_eq(&other.var_type, ctx)
+            && self.name.ctx_eq(&other.name, ctx)
+            && self.init_value.ctx_eq(&other.init_value, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct StructDeclaration<'a> {
-    pub name: Ident<'a>,
-    pub fields: Vec<'a, (Ident<'a>, Type<'a>)>,
+#[derive(Debug, Clone)]
+pub struct StructDeclaration {
+    pub name: Ident,
+    pub fields: TinyVec<[(Ident, TypeNode); 5]>,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for StructDeclaration<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.name == other.name && self.fields == other.fields
+impl CtxEq for StructDeclaration {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.name.ctx_eq(&other.name, ctx) && self.fields.ctx_eq(&other.fields, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct FunctionDeclaration<'a> {
-    pub return_type: Option<Type<'a>>,
-    pub name: Ident<'a>,
-    pub params: Vec<'a, (Ident<'a>, Type<'a>)>,
-    pub body: Block<'a>,
+#[derive(Debug, Clone)]
+pub struct FunctionDeclaration {
+    pub return_type: Option<TypeNode>,
+    pub name: Ident,
+    pub params: TinyVec<[(Ident, TypeNode); 5]>,
+    pub body: Block,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for FunctionDeclaration<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.return_type == other.return_type
-            && self.name == other.name
-            && self.params == other.params
-            && self.body == other.body
+impl CtxEq for FunctionDeclaration {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.return_type.ctx_eq(&other.return_type, ctx)
+            && self.name.ctx_eq(&other.name, ctx)
+            && self.params.ctx_eq(&other.params, ctx)
+            && self.body.ctx_eq(&other.body, ctx)
     }
 }
 
-#[derive(Debug, Clone, Eq)]
-pub struct GlobalDeclaration<'a> {
-    pub kind: GlobalDeclarationKind<'a>,
+#[derive(Debug, Clone)]
+pub struct GlobalDeclaration {
+    pub kind: GlobalDeclarationKind,
     pub span: Span,
     pub id: NodeId,
 }
 
-impl<'a> PartialEq for GlobalDeclaration<'a> {
-    fn eq(&self, other: &Self) -> bool {
-        self.kind == other.kind
+impl CtxEq for GlobalDeclaration {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.kind.ctx_eq(&other.kind, ctx)
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum GlobalDeclarationKind<'a> {
-    Variable(VariableDeclaration<'a>),
-    Struct(StructDeclaration<'a>),
-    Function(FunctionDeclaration<'a>),
+#[derive(Debug, Clone)]
+pub enum GlobalDeclarationKind {
+    Variable(VariableDeclaration),
+    Struct(StructDeclaration),
+    Function(FunctionDeclaration),
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct Program<'a> {
-    pub decls: Vec<'a, GlobalDeclaration<'a>>,
+impl CtxEq for GlobalDeclarationKind {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        match (self, other) {
+            (Self::Variable(lhs), Self::Variable(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Struct(lhs), Self::Struct(rhs)) => lhs.ctx_eq(rhs, ctx),
+            (Self::Function(lhs), Self::Function(rhs)) => lhs.ctx_eq(rhs, ctx),
+            _ => false,
+        }
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Program {
+    pub decls: Vec<GlobalDeclaration>,
+}
+
+impl CtxEq for Program {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.decls.ctx_eq(&other.decls, ctx)
+    }
 }
 
 pub mod visitor {
+    use crate::syntax::context::Context;
+
     use super::*;
     pub trait AstVisitor {
-        fn visit_expr(&mut self, expr: &Expr<'_>) {
-            walk_expr(self, expr)
+        fn visit_expr(&mut self, expr: &Expr, ctx: &Context) {
+            walk_expr(self, expr, ctx)
         }
-        fn visit_stmt(&mut self, stmt: &Stmt<'_>) {
-            walk_stmt(self, stmt)
+        fn visit_stmt(&mut self, stmt: &Stmt, ctx: &Context) {
+            walk_stmt(self, stmt, ctx)
         }
-        fn visit_global_declaration(&mut self, decl: &GlobalDeclaration<'_>) {
-            walk_global_declaration(self, decl)
+        fn visit_global_declaration(&mut self, decl: &GlobalDeclaration, ctx: &Context) {
+            walk_global_declaration(self, decl, ctx)
         }
-        fn visit_type(&mut self, typ: &Type<'_>) {
+        fn visit_typenode(&mut self, typ: &TypeNode, ctx: &Context) {
+            self.visit_type(ctx.get_type(typ.inner), ctx)
+        }
+        fn visit_type(&mut self, typ: &Type, ctx: &Context) {
             _ = typ;
+            _ = ctx;
         }
-        fn visit_nullptr(&mut self, expr: &Nullptr) {
+        fn visit_nullptr(&mut self, expr: &Nullptr, ctx: &Context) {
             _ = expr;
+            _ = ctx;
         }
-        fn visit_cast(&mut self, expr: &Cast<'_>) {
-            self.visit_type(&expr.to_type);
-            self.visit_expr(&expr.expr);
+        fn visit_cast(&mut self, expr: &Cast, ctx: &Context) {
+            self.visit_typenode(&expr.to_type, ctx);
+            self.visit_expr(ctx.get_expr(expr.expr), ctx);
         }
-        fn visit_ident_expr(&mut self, expr: &Ident<'_>) {
+        fn visit_ident_expr(&mut self, expr: &Ident, ctx: &Context) {
             _ = expr;
+            _ = ctx;
         }
-        fn visit_int(&mut self, expr: &Int) {
+        fn visit_int(&mut self, expr: &Int, ctx: &Context) {
             _ = expr;
+            _ = ctx;
         }
-        fn visit_binary_op(&mut self, expr: &BinaryOp<'_>) {
-            self.visit_expr(&expr.left);
-            self.visit_expr(&expr.right);
+        fn visit_binary_op(&mut self, expr: &BinaryOp, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.left), ctx);
+            self.visit_expr(ctx.get_expr(expr.right), ctx);
         }
-        fn visit_prefix_op(&mut self, expr: &PrefixOp<'_>) {
-            self.visit_expr(&expr.expr);
+        fn visit_prefix_op(&mut self, expr: &PrefixOp, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.expr), ctx);
         }
-        fn visit_postfix_op(&mut self, expr: &PostfixOp<'_>) {
-            self.visit_expr(&expr.expr);
+        fn visit_postfix_op(&mut self, expr: &PostfixOp, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.expr), ctx);
         }
-        fn visit_ternary(&mut self, expr: &Ternary<'_>) {
-            self.visit_expr(&expr.condition);
-            self.visit_expr(&expr.true_branch);
-            self.visit_expr(&expr.false_branch);
+        fn visit_ternary(&mut self, expr: &Ternary, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.condition), ctx);
+            self.visit_expr(ctx.get_expr(expr.true_branch), ctx);
+            self.visit_expr(ctx.get_expr(expr.false_branch), ctx);
         }
-        fn visit_function_call(&mut self, expr: &FunctionCall<'_>) {
-            self.visit_expr(&expr.func_expr);
+        fn visit_function_call(&mut self, expr: &FunctionCall, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.func_expr), ctx);
             for arg in &expr.args {
-                self.visit_expr(arg);
+                self.visit_expr(ctx.get_expr(*arg), ctx);
             }
         }
-        fn visit_array_index(&mut self, expr: &ArrayIndex<'_>) {
-            self.visit_expr(&expr.array);
-            self.visit_expr(&expr.index);
+        fn visit_array_index(&mut self, expr: &ArrayIndex, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.array), ctx);
+            self.visit_expr(ctx.get_expr(expr.index), ctx);
         }
-        fn visit_sizeof_type(&mut self, expr: &SizeOfType<'_>) {
-            self.visit_type(&expr.typ);
+        fn visit_sizeof_type(&mut self, expr: &SizeOfType, ctx: &Context) {
+            self.visit_typenode(&expr.typ, ctx);
         }
-        fn visit_struct_init(&mut self, expr: &StructInit<'_>) {
+        fn visit_struct_init(&mut self, expr: &StructInit, ctx: &Context) {
             for (_name, expr) in &expr.field_inits {
-                self.visit_expr(expr);
+                self.visit_expr(ctx.get_expr(*expr), ctx);
             }
         }
-        fn visit_array_init(&mut self, expr: &ArrayInit<'_>) {
+        fn visit_array_init(&mut self, expr: &ArrayInit, ctx: &Context) {
             for init in &expr.elements {
-                self.visit_expr(init);
+                self.visit_expr(ctx.get_expr(*init), ctx);
             }
         }
-        fn visit_member_access(&mut self, expr: &MemberAccess<'_>) {
-            self.visit_expr(&expr.struct_expr);
+        fn visit_member_access(&mut self, expr: &MemberAccess, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.struct_expr), ctx);
         }
-        fn visit_pointer_member_access(&mut self, expr: &PointerMemberAccess<'_>) {
-            self.visit_expr(&expr.struct_ptr_expr);
+        fn visit_pointer_member_access(&mut self, expr: &PointerMemberAccess, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.struct_ptr_expr), ctx);
         }
-        fn visit_assert(&mut self, stmt: &Assert<'_>) {
-            self.visit_expr(&stmt.condition);
+        fn visit_assert(&mut self, stmt: &Assert, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(stmt.condition), ctx);
         }
-        fn visit_break(&mut self, stmt: &Break) {
+        fn visit_break(&mut self, stmt: &Break, ctx: &Context) {
             _ = stmt;
+            _ = ctx;
         }
-        fn visit_continue(&mut self, stmt: &Continue) {
+        fn visit_continue(&mut self, stmt: &Continue, ctx: &Context) {
             _ = stmt;
+            _ = ctx;
         }
-        fn visit_block(&mut self, stmt: &Block<'_>) {
+        fn visit_block(&mut self, stmt: &Block, ctx: &Context) {
             for stmt in &stmt.body {
-                self.visit_stmt(stmt);
+                self.visit_stmt(ctx.get_stmt(*stmt), ctx);
             }
         }
-        fn visit_if_stmt(&mut self, stmt: &IfStmt<'_>) {
-            self.visit_expr(&stmt.condition);
-            self.visit_stmt(&stmt.then_branch);
-            if let Some(else_branch) = &stmt.else_branch {
-                self.visit_stmt(else_branch);
+        fn visit_if_stmt(&mut self, stmt: &IfStmt, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(stmt.condition), ctx);
+            self.visit_stmt(ctx.get_stmt(stmt.then_branch), ctx);
+            if let Some(else_branch) = stmt.else_branch {
+                self.visit_stmt(ctx.get_stmt(else_branch), ctx);
             }
         }
-        fn visit_while_loop(&mut self, stmt: &WhileLoop<'_>) {
-            self.visit_expr(&stmt.condition);
-            self.visit_stmt(&stmt.body);
+        fn visit_while_loop(&mut self, stmt: &WhileLoop, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(stmt.condition), ctx);
+            self.visit_stmt(ctx.get_stmt(stmt.body), ctx);
         }
-        fn visit_for_loop(&mut self, stmt: &ForLoop<'_>) {
-            if let Some(init) = &stmt.init {
-                self.visit_stmt(init);
+        fn visit_for_loop(&mut self, stmt: &ForLoop, ctx: &Context) {
+            if let Some(init) = stmt.init {
+                self.visit_stmt(ctx.get_stmt(init), ctx);
             }
-            if let Some(condition) = &stmt.condition {
-                self.visit_expr(condition);
+            if let Some(condition) = stmt.condition {
+                self.visit_expr(ctx.get_expr(condition), ctx);
             }
-            if let Some(post) = &stmt.post {
-                self.visit_expr(post);
+            if let Some(post) = stmt.post {
+                self.visit_expr(ctx.get_expr(post), ctx);
             }
-            self.visit_stmt(&stmt.body);
+            self.visit_stmt(ctx.get_stmt(stmt.body), ctx);
         }
-        fn visit_return(&mut self, stmt: &ReturnStmt<'_>) {
-            if let Some(expr) = &stmt.value {
-                self.visit_expr(expr);
-            }
-        }
-        fn visit_variable_declaration(&mut self, decl: &VariableDeclaration<'_>) {
-            self.visit_type(&decl.var_type);
-            if let Some(init) = &decl.init_value {
-                self.visit_expr(init);
+        fn visit_return(&mut self, stmt: &ReturnStmt, ctx: &Context) {
+            if let Some(expr) = stmt.value {
+                self.visit_expr(ctx.get_expr(expr), ctx);
             }
         }
-        fn visit_struct_declaration(&mut self, decl: &StructDeclaration<'_>) {
+        fn visit_variable_declaration(&mut self, decl: &VariableDeclaration, ctx: &Context) {
+            self.visit_typenode(&decl.var_type, ctx);
+            if let Some(init) = decl.init_value {
+                self.visit_expr(ctx.get_expr(init), ctx);
+            }
+        }
+        fn visit_struct_declaration(&mut self, decl: &StructDeclaration, ctx: &Context) {
             for (_name, typ) in &decl.fields {
-                self.visit_type(typ);
+                self.visit_typenode(typ, ctx);
             }
         }
-        fn visit_function_declaration(&mut self, decl: &FunctionDeclaration<'_>) {
+        fn visit_function_declaration(&mut self, decl: &FunctionDeclaration, ctx: &Context) {
             if let Some(ret_type) = &decl.return_type {
-                self.visit_type(ret_type);
+                self.visit_typenode(ret_type, ctx);
             }
             for (_name, typ) in &decl.params {
-                self.visit_type(typ);
+                self.visit_typenode(typ, ctx);
             }
-            self.visit_block(&decl.body);
+            self.visit_block(&decl.body, ctx);
         }
-        fn visit_program(&mut self, program: &Program<'_>) {
+        fn visit_program(&mut self, program: &Program, ctx: &Context) {
             for decl in &program.decls {
-                self.visit_global_declaration(decl);
+                self.visit_global_declaration(decl, ctx);
             }
         }
-        fn visit_error_expr(&mut self) {}
-        fn visit_error_stmt(&mut self) {}
+        fn visit_error_expr(&mut self, ctx: &Context) {
+            _ = ctx;
+        }
+        fn visit_error_stmt(&mut self, ctx: &Context) {
+            _ = ctx;
+        }
     }
 
-    pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr<'_>) {
-        match expr.kind {
-            ExprKind::Nullptr(nullptr) => visitor.visit_nullptr(nullptr),
-            ExprKind::Cast(cast) => visitor.visit_cast(cast),
-            ExprKind::Ident(ident) => visitor.visit_ident_expr(ident),
-            ExprKind::Int(int) => visitor.visit_int(int),
-            ExprKind::BinaryOp(binary_op) => visitor.visit_binary_op(binary_op),
-            ExprKind::PrefixOp(prefix_op) => visitor.visit_prefix_op(prefix_op),
-            ExprKind::PostfixOp(postfix_op) => visitor.visit_postfix_op(postfix_op),
-            ExprKind::Ternary(ternary) => visitor.visit_ternary(ternary),
-            ExprKind::FunctionCall(function_call) => visitor.visit_function_call(function_call),
-            ExprKind::ArrayIndex(array_index) => visitor.visit_array_index(array_index),
-            ExprKind::SizeOfType(size_of_type) => visitor.visit_sizeof_type(size_of_type),
-            ExprKind::StructInit(struct_init) => visitor.visit_struct_init(struct_init),
-            ExprKind::ArrayInit(array_init) => visitor.visit_array_init(array_init),
-            ExprKind::MemberAccess(member_access) => visitor.visit_member_access(member_access),
-            ExprKind::PointerMemberAccess(pointer_member_access) => {
-                visitor.visit_pointer_member_access(pointer_member_access)
+    pub fn walk_expr<V: AstVisitor + ?Sized>(visitor: &mut V, expr: &Expr, ctx: &Context) {
+        match &expr.kind {
+            ExprKind::Nullptr(nullptr) => visitor.visit_nullptr(nullptr, ctx),
+            ExprKind::Cast(cast) => visitor.visit_cast(cast, ctx),
+            ExprKind::Ident(ident) => visitor.visit_ident_expr(ident, ctx),
+            ExprKind::Int(int) => visitor.visit_int(int, ctx),
+            ExprKind::BinaryOp(binary_op) => visitor.visit_binary_op(binary_op, ctx),
+            ExprKind::PrefixOp(prefix_op) => visitor.visit_prefix_op(prefix_op, ctx),
+            ExprKind::PostfixOp(postfix_op) => visitor.visit_postfix_op(postfix_op, ctx),
+            ExprKind::Ternary(ternary) => visitor.visit_ternary(ternary, ctx),
+            ExprKind::FunctionCall(function_call) => {
+                visitor.visit_function_call(function_call, ctx)
             }
-            ExprKind::Error => visitor.visit_error_expr(),
+            ExprKind::ArrayIndex(array_index) => visitor.visit_array_index(array_index, ctx),
+            ExprKind::SizeOfType(size_of_type) => visitor.visit_sizeof_type(size_of_type, ctx),
+            ExprKind::StructInit(struct_init) => visitor.visit_struct_init(struct_init, ctx),
+            ExprKind::ArrayInit(array_init) => visitor.visit_array_init(array_init, ctx),
+            ExprKind::MemberAccess(member_access) => {
+                visitor.visit_member_access(member_access, ctx)
+            }
+            ExprKind::PointerMemberAccess(pointer_member_access) => {
+                visitor.visit_pointer_member_access(pointer_member_access, ctx)
+            }
+            ExprKind::Error => visitor.visit_error_expr(ctx),
         }
     }
-    pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt<'_>) {
-        match stmt.kind {
-            StmtKind::Assert(assert) => visitor.visit_assert(assert),
-            StmtKind::Break(break_) => visitor.visit_break(break_),
-            StmtKind::Continue(continue_) => visitor.visit_continue(continue_),
-            StmtKind::Block(block) => visitor.visit_block(block),
-            StmtKind::IfStmt(if_stmt) => visitor.visit_if_stmt(if_stmt),
-            StmtKind::WhileLoop(while_loop) => visitor.visit_while_loop(while_loop),
-            StmtKind::ForLoop(for_loop) => visitor.visit_for_loop(for_loop),
-            StmtKind::ReturnStmt(return_stmt) => visitor.visit_return(return_stmt),
+    pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt, ctx: &Context) {
+        match &stmt.kind {
+            StmtKind::Assert(assert) => visitor.visit_assert(assert, ctx),
+            StmtKind::Break(break_) => visitor.visit_break(break_, ctx),
+            StmtKind::Continue(continue_) => visitor.visit_continue(continue_, ctx),
+            StmtKind::Block(block) => visitor.visit_block(block, ctx),
+            StmtKind::IfStmt(if_stmt) => visitor.visit_if_stmt(if_stmt, ctx),
+            StmtKind::WhileLoop(while_loop) => visitor.visit_while_loop(while_loop, ctx),
+            StmtKind::ForLoop(for_loop) => visitor.visit_for_loop(for_loop, ctx),
+            StmtKind::ReturnStmt(return_stmt) => visitor.visit_return(return_stmt, ctx),
             StmtKind::VariableDeclaration(variable_declaration) => {
-                visitor.visit_variable_declaration(variable_declaration)
+                visitor.visit_variable_declaration(variable_declaration, ctx)
             }
-            StmtKind::Expr(expr) => visitor.visit_expr(expr),
+            StmtKind::Expr(expr) => visitor.visit_expr(expr, ctx),
         }
     }
     pub fn walk_global_declaration<V: AstVisitor + ?Sized>(
         visitor: &mut V,
-        decl: &GlobalDeclaration<'_>,
+        decl: &GlobalDeclaration,
+        ctx: &Context,
     ) {
         match &decl.kind {
             GlobalDeclarationKind::Variable(variable_declaration) => {
-                visitor.visit_variable_declaration(variable_declaration)
+                visitor.visit_variable_declaration(variable_declaration, ctx)
             }
             GlobalDeclarationKind::Struct(struct_declaration) => {
-                visitor.visit_struct_declaration(struct_declaration)
+                visitor.visit_struct_declaration(struct_declaration, ctx)
             }
             GlobalDeclarationKind::Function(function_declaration) => {
-                visitor.visit_function_declaration(function_declaration)
+                visitor.visit_function_declaration(function_declaration, ctx)
             }
         }
     }

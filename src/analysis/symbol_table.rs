@@ -7,7 +7,7 @@ use tinyvec::TinyVec;
 use crate::analysis::types::Type;
 use crate::analysis::types::*;
 use crate::common::span::Span;
-use crate::syntax::ast::Type as AstType;
+use crate::syntax::ast::TypeNode as AstType;
 use crate::syntax::ast::*;
 
 #[derive(Debug, Clone)]
@@ -136,7 +136,7 @@ impl<'a> SymbolTableBuilder<'a> {
                         .iter()
                         .map(|(_name, typ)| self.type_arena.intern_ast_type(typ))
                         .collect();
-                    let fnptr = self.type_arena.intern_type(Type::FuncPtr {
+                    let fnptr = self.type_arena.intern_type(TypeNode::FuncPtr {
                         return_type,
                         param_types,
                     });
@@ -165,7 +165,7 @@ impl<'a> SymbolTableBuilder<'a> {
             return Ok(info.layout);
         }
         let struct_name = SmolStr::new(struct_ident.ident);
-        self.type_arena.intern_type(Type::Struct {
+        self.type_arena.intern_type(TypeNode::Struct {
             name: struct_name.clone(),
         });
         if self.resolving.get(struct_ident.ident).is_some() {

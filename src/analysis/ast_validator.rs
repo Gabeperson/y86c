@@ -90,7 +90,7 @@ pub enum ASTValidationError {
 }
 
 impl AstVisitor for ASTValidator {
-    fn visit_type(&mut self, typ: &Type<'_>) {
+    fn visit_type(&mut self, typ: &TypeNode<'_>) {
         self.visit_type_impl(typ, false, false)
     }
 
@@ -258,7 +258,7 @@ impl AstVisitor for ASTValidator {
 }
 
 impl ASTValidator {
-    fn visit_type_impl(&mut self, typ: &Type<'_>, behind_ptr: bool, noalias_allowed: bool) {
+    fn visit_type_impl(&mut self, typ: &TypeNode<'_>, behind_ptr: bool, noalias_allowed: bool) {
         match typ.inner {
             TypeKind::Void => {
                 if !behind_ptr {

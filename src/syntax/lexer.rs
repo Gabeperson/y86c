@@ -2,7 +2,10 @@ use std::{iter::Peekable, num::IntErrorKind, str::CharIndices};
 
 use smol_str::SmolStr;
 
-use crate::common::span::Span;
+use crate::{
+    common::span::Span,
+    syntax::context::{Context, Symbol},
+};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeywordKind {
@@ -29,7 +32,7 @@ pub enum KeywordKind {
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
     Keyword(KeywordKind),
-    Ident(SmolStr),
+    Ident(Symbol),
     IntLiteral { value: u64, minus: bool },
     Plus,
     Minus,
@@ -142,9 +145,9 @@ impl CharType {
 }
 
 impl<'a> Lexer<'a> {
-    pub fn lex(s: &str) -> LexingOutput {
+    pub fn lex(s: &str, ctx: &mut Context) -> LexingOutput {
         let lexer = Lexer::new(s);
-        lexer.lex_inner()
+        lexer.lex_inner(ctx)
     }
     fn new(input: &'a str) -> Self {
         assert!(input.len() <= 4_000_000_000);
@@ -161,7 +164,7 @@ impl<'a> Lexer<'a> {
             .map(|(idx, _c)| *idx)
             .unwrap_or(self.input.len()) as u32
     }
-    fn handle_ident(&mut self, _c: char, start: u32) {
+    fn handle_ident(&mut self, _c: char, start: u32, ctx: &mut Context) {
         while let Some((_idx, c2)) = self.iter.peek()
             && (c2.is_ascii_alphanumeric() || *c2 == '_')
         {
@@ -187,7 +190,7 @@ impl<'a> Lexer<'a> {
             "void" => TokenKind::Keyword(KeywordKind::Void),
             "let" => TokenKind::Keyword(KeywordKind::Let),
             "noalias" => TokenKind::Keyword(KeywordKind::NoAlias),
-            _ => TokenKind::Ident(SmolStr::new(s)),
+            _ => TokenKind::Ident(ctx.intern_symbol(s)),
         };
         self.tokens.push(Token { kind, span });
     }
@@ -381,7 +384,7 @@ impl<'a> Lexer<'a> {
             span: Span::new(start, start + 1),
         })
     }
-    fn lex_inner(mut self) -> LexingOutput {
+    fn lex_inner(mut self, ctx: &mut Context) -> LexingOutput {
         while let Some((index, curr)) = self.iter.next() {
             if curr == '/'
                 && let Some((_index, next)) = self.iter.peek()
@@ -397,7 +400,7 @@ impl<'a> Lexer<'a> {
                 continue;
             }
             match CharType::of(curr) {
-                CharType::Alpha => self.handle_ident(curr, index as u32),
+                CharType::Alpha => self.handle_ident(curr, index as u32, ctx),
                 CharType::Num => self.handle_number(curr, index as u32, false),
                 CharType::Whitespace => {}
                 CharType::Punctutation => self.handle_operator(curr, index as u32),
@@ -432,10 +435,22 @@ impl<'a> Lexer<'a> {
 fn test_lexer() {
     #[track_caller]
     fn test(s: &str, expect: TokenKind) {
-        let output = Lexer::lex(s);
+        let mut ctx = Context::new();
+        let output = Lexer::lex(s, &mut ctx);
         assert!(!output.has_errors());
         assert_eq!(output.tokens.len(), 1);
         assert_eq!(output.tokens[0].kind, expect);
+    }
+    #[track_caller]
+    fn test_ident(s: &str) {
+        let mut ctx = Context::new();
+        let output = Lexer::lex(s, &mut ctx);
+        assert!(!output.has_errors());
+        assert_eq!(output.tokens.len(), 1);
+        assert_eq!(
+            output.tokens[0].kind,
+            TokenKind::Ident(ctx.intern_symbol(s))
+        );
     }
     test("nullptr", TokenKind::Keyword(KeywordKind::Nullptr));
     test("as", TokenKind::Keyword(KeywordKind::As));
@@ -453,17 +468,11 @@ fn test_lexer() {
     test("void", TokenKind::Keyword(KeywordKind::Void));
     test("let", TokenKind::Keyword(KeywordKind::Let));
 
-    test("hello", TokenKind::Ident(SmolStr::new("hello")));
-    test("hi", TokenKind::Ident(SmolStr::new("hi")));
-    test(
-        "interesting_thing",
-        TokenKind::Ident(SmolStr::new("interesting_thing")),
-    );
-    test("_", TokenKind::Ident(SmolStr::new("_")));
-    test(
-        "_______1521521512512",
-        TokenKind::Ident(SmolStr::new("_______1521521512512")),
-    );
+    test_ident("hello");
+    test_ident("hi");
+    test_ident("interesting_thing");
+    test_ident("_");
+    test_ident("_______1521521512512");
 
     test(
         "0",
