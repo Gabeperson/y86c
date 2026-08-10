@@ -156,64 +156,64 @@ impl AstVisitor for ASTValidator {
     fn visit_struct_init(&mut self, init: &StructInit, ctx: &Context) {
         let mut map = AHashMap::new();
         for (name, expr) in &init.field_inits {
-            if let Some(span) = map.get(&name.ident) {
+            if let Some(span) = map.get(&name.sym) {
                 self.errors
                     .push(ASTValidationError::DuplicateStructFieldInit {
-                        name: name.ident,
+                        name: name.sym,
                         field1: *span,
                         field2: name.span,
                     });
             } else {
-                map.insert(name.ident, name.span);
+                map.insert(name.sym, name.span);
             }
             self.visit_expr(ctx.get_expr(*expr), ctx);
         }
     }
 
     fn visit_struct_declaration(&mut self, decl: &StructDeclaration, ctx: &Context) {
-        if let Some(span) = self.struct_scope.get(&decl.name.ident) {
+        if let Some(span) = self.struct_scope.get(&decl.name.sym) {
             self.errors.push(ASTValidationError::DuplicateStructDecl {
-                name: decl.name.ident,
+                name: decl.name.sym,
                 prev_def: *span,
                 new_def: decl.span,
             })
         } else {
-            self.struct_scope.insert(decl.name.ident, decl.span);
+            self.struct_scope.insert(decl.name.sym, decl.span);
         }
         if decl.fields.is_empty() {
             self.errors.push(ASTValidationError::StructWithNoField {
                 decl: decl.span,
-                name: decl.name.ident,
+                name: decl.name.sym,
             })
         }
         let mut map = AHashMap::new();
         for (name, typ) in &decl.fields {
-            if let Some(span) = map.get(&name.ident) {
+            if let Some(span) = map.get(&name.sym) {
                 self.errors
                     .push(ASTValidationError::DuplicateStructFieldDeclared {
-                        name: name.ident,
+                        name: name.sym,
                         field1: *span,
                         field2: name.span,
                     });
             } else {
-                map.insert(name.ident, name.span);
+                map.insert(name.sym, name.span);
             }
             self.visit_typenode(typ, ctx);
         }
     }
 
     fn visit_function_declaration(&mut self, decl: &FunctionDeclaration, ctx: &Context) {
-        if let Some(span) = self.global_var_scope.get(&decl.name.ident) {
+        if let Some(span) = self.global_var_scope.get(&decl.name.sym) {
             self.errors.push(ASTValidationError::DuplicateGlobalSymbol {
-                symbol: decl.name.ident,
+                symbol: decl.name.sym,
                 symbol_type: GlobalSymbolType::Function,
                 prev_def: *span,
                 new_def: decl.span,
             })
         } else {
-            self.global_var_scope.insert(decl.name.ident, decl.span);
+            self.global_var_scope.insert(decl.name.sym, decl.span);
         }
-        let name = decl.name.ident;
+        let name = decl.name.sym;
         if ctx.get_symbol(name) == "main" && !self.no_main {
             self.found_main = true;
             if !decl.params.is_empty() {
@@ -227,26 +227,20 @@ impl AstVisitor for ASTValidator {
         }
         let mut map = AHashMap::new();
         for (name, typ) in &decl.params {
-            if let Some(span) = map.get(&name.ident) {
+            if let Some(span) = map.get(&name.sym) {
                 self.errors
                     .push(ASTValidationError::DuplicateParameterName {
-                        name: name.ident,
+                        name: name.sym,
                         param1: *span,
                         param2: name.span,
                     });
             } else {
-                map.insert(name.ident, name.span);
+                map.insert(name.sym, name.span);
             }
             self.visit_type_impl(ctx.get_type(typ.inner), false, true, typ.span, ctx);
         }
         if let Some(ret_type) = &decl.return_type {
-            self.visit_type_impl(
-                ctx.get_type(ret_type.inner),
-                false,
-                true,
-                ret_type.span,
-                ctx,
-            );
+            self.visit_type_impl(ctx.get_type(ret_type.inner), true, true, ret_type.span, ctx);
         }
         self.visit_block(&decl.body, ctx);
     }
@@ -278,14 +272,14 @@ impl ASTValidator {
     fn visit_type_impl(
         &mut self,
         typ: &Type,
-        behind_ptr: bool,
+        void_allowed: bool,
         noalias_allowed: bool,
         span: Span,
         ctx: &Context,
     ) {
         match typ {
             Type::Void => {
-                if !behind_ptr {
+                if !void_allowed {
                     self.errors
                         .push(ASTValidationError::VoidWithoutPtr { span });
                 }
@@ -310,9 +304,7 @@ impl ASTValidator {
                 return_type,
                 param_types,
             } => {
-                if let Some(return_type) = return_type {
-                    self.visit_type_impl(ctx.get_type(*return_type), false, true, span, ctx)
-                }
+                self.visit_type_impl(ctx.get_type(*return_type), true, true, span, ctx);
                 for param_type in param_types {
                     self.visit_type_impl(ctx.get_type(*param_type), false, true, span, ctx)
                 }
@@ -322,15 +314,15 @@ impl ASTValidator {
     }
 
     fn visit_vardecl_global(&mut self, decl: &VariableDeclaration, ctx: &Context) {
-        if let Some(span) = self.global_var_scope.get(&decl.name.ident) {
+        if let Some(span) = self.global_var_scope.get(&decl.name.sym) {
             self.errors.push(ASTValidationError::DuplicateGlobalSymbol {
-                symbol: decl.name.ident,
+                symbol: decl.name.sym,
                 symbol_type: GlobalSymbolType::VariableName,
                 prev_def: *span,
                 new_def: decl.span,
             })
         } else {
-            self.global_var_scope.insert(decl.name.ident, decl.span);
+            self.global_var_scope.insert(decl.name.sym, decl.span);
         }
         self.visit_typenode(&decl.var_type, ctx);
         if let Some(init) = &decl.init_value {
@@ -488,5 +480,14 @@ mod tests {
 
         assert_fail("fn foo() {} let foo: int;", true);
         assert_fail("let foo: int; let foo: int;", true);
+
+        assert_success("fn foo() -> void {}", true);
+        assert_success("let x: fn() -> void;", true);
+        assert_success("let x: fn(int) -> void;", true);
+        assert_success("let x: fn(*void) -> void;", true);
+
+        assert_success("fn foo() -> void {let x: fn() -> void;}", true);
+        assert_fail("fn foo(x: void) {}", true);
+        assert_fail("fn foo() {let x: void;}", true);
     }
 }

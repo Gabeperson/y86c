@@ -1,7 +1,6 @@
 use ahash::AHashSet;
 use ahash::{AHashMap, HashMap, RandomState};
 use indexmap::IndexMap;
-use smol_str::SmolStr;
 use tinyvec::TinyVec;
 
 use crate::common::span::Span;
@@ -111,7 +110,7 @@ impl<'a> SymbolTableBuilder<'a> {
             match &decl.kind {
                 GlobalDeclarationKind::Variable(decl) => {
                     let typ = decl.var_type.inner;
-                    let name = decl.name.ident;
+                    let name = decl.name.sym;
                     let entry = GlobalVariableEntry {
                         typ,
                         is_function: false,
@@ -122,11 +121,15 @@ impl<'a> SymbolTableBuilder<'a> {
                     );
                 }
                 GlobalDeclarationKind::Struct(decl) => {
-                    self.struct_map.insert(decl.name.ident, decl);
+                    self.struct_map.insert(decl.name.sym, decl);
                 }
                 GlobalDeclarationKind::Function(decl) => {
-                    let name = decl.name.ident;
-                    let return_type = decl.return_type.as_ref().map(|tn| tn.inner);
+                    let name = decl.name.sym;
+                    let return_type = decl
+                        .return_type
+                        .as_ref()
+                        .map(|tn| tn.inner)
+                        .unwrap_or_else(|| self.ctx.intern_type(Type::Void));
                     let param_types: TinyVec<[TypeId; 5]> =
                         decl.params.iter().map(|(_name, typ)| typ.inner).collect();
                     let fnptr = self.ctx.intern_type(Type::FuncPtr {
@@ -181,7 +184,7 @@ impl<'a> SymbolTableBuilder<'a> {
         let mut map = IndexMap::<Symbol, FieldInfo, RandomState>::with_hasher(RandomState::new());
         for (name, typ) in &decl.fields {
             self.resolving.insert(
-                struct_name.clone(),
+                struct_name,
                 StructResolvingRequirement {
                     outer: span,
                     inner: typ.span,
@@ -200,7 +203,7 @@ impl<'a> SymbolTableBuilder<'a> {
                 typ: id,
                 layout,
             };
-            map.insert(name.ident, info);
+            map.insert(name.sym, info);
             size += layout.size;
             align = usize::max(align, layout.align);
         }
@@ -251,6 +254,7 @@ impl<'a> SymbolTableBuilder<'a> {
 
 #[cfg(test)]
 mod tests {
+
     use crate::{
         analysis::ast_validator::ASTValidator,
         syntax::{lexer::Lexer, parser::Parser},
@@ -294,6 +298,14 @@ mod tests {
             struct Arrays { a: [int; 2], b: [Eight; 1], c: [Sixteen; 15], };
             struct Ptrs { a: *int, b: *Eight, c: *Sixteen, d: *fn(int) -> *int, };
             struct NestedArray { a: [[int; 4]; 5], b: [[*NestedArray; 2]; 2] }
+            let x: int = 5;
+            let y: *int;
+            let z: *SomeStruct;
+            let a: fn(int) -> *int;
+            let b: fn() -> void;
+            fn foo(a: int) -> void {}
+            fn bar(b: int) {}
+            fn baz(c: int) -> *int {}
         "#;
         let mut ctx = Context::new();
         let table = succeeds(code, &mut ctx);
@@ -353,6 +365,60 @@ mod tests {
         assert_eq!(nestedarr.fields.len(), 2);
         assert_eq!(nestedarr.fields[0].offset, 0);
         assert_eq!(nestedarr.fields[1].offset, 160);
+        let int = ctx.intern_type(Type::Int);
+        let int_ptr = ctx.intern_type(Type::Ptr {
+            pointee: int,
+            noalias: false,
+        });
+        let name = ctx.intern_symbol("SomeStruct");
+        let pointee = ctx.intern_type(Type::Struct { name });
+        let somestruct_ptr = ctx.intern_type(Type::Ptr {
+            pointee,
+            noalias: false,
+        });
+        let mut v = TinyVec::new();
+        v.push(int);
+        let fnptr1 = ctx.intern_type(Type::FuncPtr {
+            return_type: int_ptr,
+            param_types: v.clone(),
+        });
+        let void = ctx.intern_type(Type::Void);
+        let fnptr2 = ctx.intern_type(Type::FuncPtr {
+            return_type: void,
+            param_types: TinyVec::new(),
+        });
+        let fnptr34 = ctx.intern_type(Type::FuncPtr {
+            return_type: void,
+            param_types: v.clone(),
+        });
+        let fnptr5 = ctx.intern_type(Type::FuncPtr {
+            return_type: int_ptr,
+            param_types: v,
+        });
+        let e1 = table.vars.get(&ctx.intern_symbol("x")).unwrap();
+        assert!(!e1.is_function);
+        assert_eq!(e1.typ, int);
+        let e2 = table.vars.get(&ctx.intern_symbol("y")).unwrap();
+        assert!(!e2.is_function);
+        assert_eq!(e2.typ, int_ptr);
+        let e3 = table.vars.get(&ctx.intern_symbol("z")).unwrap();
+        assert!(!e3.is_function);
+        assert_eq!(e3.typ, somestruct_ptr);
+        let e4 = table.vars.get(&ctx.intern_symbol("a")).unwrap();
+        assert!(!e4.is_function);
+        assert_eq!(e4.typ, fnptr1);
+        let e5 = table.vars.get(&ctx.intern_symbol("b")).unwrap();
+        assert!(!e5.is_function);
+        assert_eq!(e5.typ, fnptr2);
+        let e6 = table.vars.get(&ctx.intern_symbol("foo")).unwrap();
+        assert!(e6.is_function);
+        assert_eq!(e6.typ, fnptr34);
+        let e7 = table.vars.get(&ctx.intern_symbol("bar")).unwrap();
+        assert!(e7.is_function);
+        assert_eq!(e7.typ, fnptr34);
+        let e8 = table.vars.get(&ctx.intern_symbol("baz")).unwrap();
+        assert!(e8.is_function);
+        assert_eq!(e8.typ, fnptr5);
     }
 
     #[test]

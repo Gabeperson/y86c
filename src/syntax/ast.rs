@@ -74,12 +74,25 @@ pub enum Type {
         len: i64,
     },
     FuncPtr {
-        return_type: Option<TypeId>,
+        return_type: TypeId,
         param_types: TinyVec<[TypeId; 5]>,
     },
 }
 
-#[derive(Debug, Clone, Default)]
+impl Type {
+    pub fn is_intlike(&self) -> bool {
+        match self {
+            Type::Void => false,
+            Type::Int => true,
+            Type::Ptr { .. } => true,
+            Type::Struct { .. } => false,
+            Type::Array { .. } => false,
+            Type::FuncPtr { .. } => true,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, Copy)]
 pub struct TypeNode {
     pub inner: TypeId,
     pub span: Span,
@@ -189,16 +202,16 @@ impl CtxEq for Cast {
     }
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, Copy)]
 pub struct Ident {
-    pub ident: Symbol,
+    pub sym: Symbol,
     pub span: Span,
     pub id: NodeId,
 }
 
 impl CtxEq for Ident {
     fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
-        self.ident.ctx_eq(&other.ident, ctx)
+        self.sym.ctx_eq(&other.sym, ctx)
     }
 }
 

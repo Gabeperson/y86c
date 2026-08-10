@@ -351,9 +351,9 @@ impl<'t> Parser<'t> {
                     let (typ, ret_span) = self.parse_type(ctx)?;
                     let typ = ctx.intern_type(typ);
                     span.end = ret_span.end;
-                    Some(typ)
+                    typ
                 } else {
-                    None
+                    ctx.intern_type(Type::Void)
                 };
                 Ok((
                     Type::FuncPtr {
@@ -381,7 +381,7 @@ impl<'t> Parser<'t> {
             TokenKind::Asterisk => self.parse_pointer(token, false, ctx),
             TokenKind::Ident(_) => {
                 let ident = self.parse_ident(ctx)?;
-                Ok((Type::Struct { name: ident.ident }, ident.span))
+                Ok((Type::Struct { name: ident.sym }, ident.span))
             }
             TokenKind::LSquare => {
                 self.advance();
@@ -521,6 +521,8 @@ impl<'t> Parser<'t> {
         }
         self.expect(TokenKind::RParen, "Expected ')' after function parameters")?;
         let token = self.current()?;
+        // This parses '-> void' as Some(Type::Void) and no return as in 'fn foo() {}' as
+        // None. This is fine, as it's normalized in later passes to just Type::Void.
         let ret_type = match token.kind {
             TokenKind::LCurly => None,
             TokenKind::Arrow => {
@@ -717,7 +719,7 @@ impl<'t> Parser<'t> {
         self.advance();
         let id = self.next_id();
         Ok(Ident {
-            ident: symbol,
+            sym: symbol,
             span: token.span,
             id,
         })
@@ -842,7 +844,7 @@ impl<'t> Parser<'t> {
                     self.advance();
                     let id = self.next_id();
                     let kind = ExprKind::Ident(Ident {
-                        ident: s,
+                        sym: s,
                         span: token.span,
                         id,
                     });
@@ -1179,7 +1181,7 @@ mod tests {
         }
         pub fn ident(s: &str) -> Ident {
             Ident {
-                ident: ctx().intern_symbol(s),
+                sym: ctx().intern_symbol(s),
                 span: Span::empty(),
                 id: NodeId(0),
             }
@@ -1203,7 +1205,7 @@ mod tests {
             Type::Int
         }
         pub fn struct_(s: Ident) -> Type {
-            Type::Struct { name: s.ident }
+            Type::Struct { name: s.sym }
         }
         pub fn array(t: Type, len: i64) -> Type {
             Type::Array {
@@ -1218,13 +1220,13 @@ mod tests {
                 id: NodeId(1),
             }
         }
-        pub fn func_ptr(param_types: Vec<Type>, return_type: Option<Type>) -> Type {
+        pub fn func_ptr(param_types: Vec<Type>, return_type: Type) -> Type {
             let mut v = TinyVec::new();
             let ctx = &mut ctx();
             for i in param_types {
                 v.push(ctx.intern_type(i))
             }
-            let return_type = return_type.map(|t| ctx.intern_type(t));
+            let return_type = ctx.intern_type(return_type);
             Type::FuncPtr {
                 return_type,
                 param_types: v,
@@ -1727,9 +1729,10 @@ mod tests {
         compare_types("[Something; 1]", array(struct_(ident("Something")), 1));
         compare_types("[int; 2555555]", array(int(), 2555555));
         compare_types("**Something", ptr(ptr(struct_(ident("Something")))));
-        compare_types("fn()", func_ptr(Vec::new(), None));
-        compare_types("*fn()", ptr(func_ptr(Vec::new(), None)));
-        compare_types("fn(int)", func_ptr(vec![int()], None));
+        compare_types("fn()", func_ptr(Vec::new(), Type::Void));
+        compare_types("fn()->void", func_ptr(Vec::new(), Type::Void));
+        compare_types("*fn()", ptr(func_ptr(Vec::new(), Type::Void)));
+        compare_types("fn(int)", func_ptr(vec![int()], Type::Void));
         compare_types("noalias *int", noalias_ptr(int()));
         compare_types("noalias * noalias *int", noalias_ptr(noalias_ptr(int())));
         compare_types("noalias *void", noalias_ptr(void()));
@@ -1741,19 +1744,16 @@ mod tests {
         compare_types("noalias **int", noalias_ptr(ptr(int())));
         compare_types("* noalias *int", ptr(noalias_ptr(int())));
 
-        compare_types(
-            "fn(int, int) -> int",
-            func_ptr(vec![int(), int()], Some(int())),
-        );
+        compare_types("fn(int, int) -> int", func_ptr(vec![int(), int()], int()));
         compare_types(
             "fn(int, int) -> SomeStruct",
-            func_ptr(vec![int(), int()], Some(struct_(ident("SomeStruct")))),
+            func_ptr(vec![int(), int()], struct_(ident("SomeStruct"))),
         );
         compare_types(
             "fn(int, int) -> ***SomeStruct",
             func_ptr(
                 vec![int(), int()],
-                Some(ptr(ptr(ptr(struct_(ident("SomeStruct")))))),
+                ptr(ptr(ptr(struct_(ident("SomeStruct"))))),
             ),
         );
         compare_types(
@@ -1763,36 +1763,27 @@ mod tests {
                     struct_(ident("SomeStruct")),
                     struct_(ident("SomeOtherStruct")),
                 ],
-                Some(struct_(ident("SomeStruct"))),
+                struct_(ident("SomeStruct")),
             ),
         );
         compare_types(
             "fn(int, int) -> fn(int, int) -> int",
-            func_ptr(
-                vec![int(), int()],
-                Some(func_ptr(vec![int(), int()], Some(int()))),
-            ),
+            func_ptr(vec![int(), int()], func_ptr(vec![int(), int()], int())),
         );
         compare_types(
             "fn(fn(int, int) -> fn(int, int) -> int, fn(fn(int, int) -> fn(int, int) -> int, int) -> fn(int, int) -> int) -> fn(int, int) -> int",
             func_ptr(
                 vec![
-                    func_ptr(
-                        vec![int(), int()],
-                        Some(func_ptr(vec![int(), int()], Some(int()))),
-                    ),
+                    func_ptr(vec![int(), int()], func_ptr(vec![int(), int()], int())),
                     func_ptr(
                         vec![
-                            func_ptr(
-                                vec![int(), int()],
-                                Some(func_ptr(vec![int(), int()], Some(int()))),
-                            ),
+                            func_ptr(vec![int(), int()], func_ptr(vec![int(), int()], int())),
                             int(),
                         ],
-                        Some(func_ptr(vec![int(), int()], Some(int()))),
+                        func_ptr(vec![int(), int()], int()),
                     ),
                 ],
-                Some(func_ptr(vec![int(), int()], Some(int()))),
+                func_ptr(vec![int(), int()], int()),
             ),
         );
     }
@@ -2876,6 +2867,10 @@ mod tests {
         compare_funcdecl(
             "fn f() {}",
             func_decl(ident("f"), vec![], None, bblock(vec![])),
+        );
+        compare_funcdecl(
+            "fn f() -> void {}",
+            func_decl(ident("f"), vec![], Some(get_type("void")), bblock(vec![])),
         );
         compare_funcdecl(
             "fn f() -> int {}",
