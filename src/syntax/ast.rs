@@ -80,6 +80,31 @@ pub enum Type {
 }
 
 impl Type {
+    pub fn is_void(&self) -> bool {
+        matches!(self, Type::Void)
+    }
+    pub fn is_int(&self) -> bool {
+        matches!(self, Type::Int)
+    }
+    pub fn is_ptr(&self) -> bool {
+        matches!(self, Type::Ptr { .. })
+    }
+    pub fn is_struct(&self) -> bool {
+        matches!(self, Type::Struct { .. })
+    }
+    pub fn is_array(&self) -> bool {
+        matches!(self, Type::Array { .. })
+    }
+    pub fn is_fnptr(&self) -> bool {
+        matches!(self, Type::FuncPtr { .. })
+    }
+    pub fn indexed_type(&self) -> Option<TypeId> {
+        match self {
+            Type::Ptr { pointee, .. } => Some(*pointee),
+            Type::Array { element_type, .. } => Some(*element_type),
+            _ => None,
+        }
+    }
     pub fn is_intlike(&self) -> bool {
         match self {
             Type::Void => false,
@@ -176,7 +201,7 @@ impl CtxEq for ExprKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Nullptr {
     pub span: Span,
     pub id: NodeId,
@@ -188,7 +213,7 @@ impl CtxEq for Nullptr {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Cast {
     pub to_type: TypeNode,
     pub expr: ExprId,
@@ -255,7 +280,25 @@ pub enum BinaryOpKind {
     ModAssign,
     Assign,
 }
-#[derive(Debug, Clone)]
+
+impl BinaryOpKind {
+    pub fn needs_assignable(&self) -> bool {
+        matches!(
+            self,
+            BinaryOpKind::AddAssign
+                | BinaryOpKind::SubAssign
+                | BinaryOpKind::MulAssign
+                | BinaryOpKind::DivAssign
+                | BinaryOpKind::BitAndAssign
+                | BinaryOpKind::BitOrAssign
+                | BinaryOpKind::XorAssign
+                | BinaryOpKind::ModAssign
+                | BinaryOpKind::Assign
+        )
+    }
+}
+
+#[derive(Copy, Debug, Clone)]
 pub struct BinaryOp {
     pub kind: BinaryOpKind,
     pub left: ExprId,
@@ -284,7 +327,7 @@ pub enum PrefixOpKind {
     BitNot,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Copy, Debug, Clone)]
 pub struct PrefixOp {
     pub kind: PrefixOpKind,
     pub expr: ExprId,
@@ -303,7 +346,7 @@ pub enum PostfixOpKind {
     Decrement,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PostfixOp {
     pub kind: PostfixOpKind,
     pub expr: ExprId,
@@ -317,7 +360,7 @@ impl CtxEq for PostfixOp {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Ternary {
     pub condition: ExprId,
     pub true_branch: ExprId,
@@ -348,7 +391,7 @@ impl CtxEq for FunctionCall {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ArrayIndex {
     pub array: ExprId,
     pub index: ExprId,
@@ -362,7 +405,7 @@ impl CtxEq for ArrayIndex {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct SizeOfType {
     pub typ: TypeNode,
     pub span: Span,
@@ -402,7 +445,7 @@ impl CtxEq for ArrayInit {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct MemberAccess {
     pub struct_expr: ExprId,
     pub member_name: Ident,
@@ -417,7 +460,7 @@ impl CtxEq for MemberAccess {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct PointerMemberAccess {
     pub struct_ptr_expr: ExprId,
     pub member_name: Ident,
@@ -456,7 +499,7 @@ pub enum StmtKind {
     ForLoop(ForLoop),
     ReturnStmt(ReturnStmt),
     VariableDeclaration(VariableDeclaration),
-    Expr(Expr),
+    Expr(ExprId),
 }
 
 impl CtxEq for StmtKind {
@@ -881,7 +924,7 @@ pub mod visitor {
             StmtKind::VariableDeclaration(variable_declaration) => {
                 visitor.visit_variable_declaration(variable_declaration, ctx)
             }
-            StmtKind::Expr(expr) => visitor.visit_expr(expr, ctx),
+            StmtKind::Expr(expr) => visitor.visit_expr(ctx.get_expr(*expr), ctx),
         }
     }
     pub fn walk_global_declaration<V: AstVisitor + ?Sized>(

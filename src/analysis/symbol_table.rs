@@ -53,6 +53,7 @@ pub struct FieldInfo {
 pub struct GlobalVariableEntry {
     pub typ: TypeId,
     pub is_function: bool,
+    pub span: Span,
 }
 
 #[derive(Debug, Clone)]
@@ -112,6 +113,7 @@ impl<'a> SymbolTableBuilder<'a> {
                     let typ = decl.var_type.inner;
                     let name = decl.name.sym;
                     let entry = GlobalVariableEntry {
+                        span: decl.name.span,
                         typ,
                         is_function: false,
                     };
@@ -137,6 +139,7 @@ impl<'a> SymbolTableBuilder<'a> {
                         param_types,
                     });
                     let entry = GlobalVariableEntry {
+                        span: decl.name.span,
                         typ: fnptr,
                         is_function: true,
                     };

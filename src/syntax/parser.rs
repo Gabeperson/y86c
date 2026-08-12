@@ -272,6 +272,7 @@ impl<'t> Parser<'t> {
                 let expr = self.parse_expr(ctx)?;
                 let span = expr.span;
                 let id = expr.id;
+                let expr = ctx.intern_expr(expr);
                 let kind = StmtKind::Expr(expr);
                 Stmt { kind, span, id }
             }
@@ -651,6 +652,7 @@ impl<'t> Parser<'t> {
                 let expr = self.parse_expr(ctx)?;
                 let span = expr.span;
                 let id = expr.id;
+                let expr = ctx.intern_expr(expr);
                 let kind = StmtKind::Expr(expr);
                 Some(Stmt { kind, span, id })
             }
@@ -1611,8 +1613,9 @@ mod tests {
             }
         }
         pub fn exprstmt(expr: Expr) -> Stmt {
+            let mut ctx = ctx();
             Stmt {
-                kind: StmtKind::Expr(expr),
+                kind: StmtKind::Expr(ctx.intern_expr(expr)),
                 span: Span::empty(),
                 id: NodeId(0),
             }
