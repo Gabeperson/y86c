@@ -1,0 +1,542 @@
+fn u_void() {}
+fn u_fn1(x: int) -> int {}
+fn u_fn2(x: *int) -> *int {}
+fn u_fn3(x: *void) -> *void {}
+struct Struct {x: int}
+struct BigStruct {
+    a: int,
+    b: *int,
+    c: *void,
+}
+let bs: BigStruct;
+let bsp: *BigStruct;
+
+fn v_cond_if1() { if (1) {} }
+fn v_cond_if2() { if (0) {} }
+fn v_cond_if3() { if (0 as *void) {} }
+fn v_cond_if4() { if (0 as *int) {} }
+fn v_cond_if5() { if (u_void) {} }
+fn i_cond_if6() { if (Something) {} }
+fn i_cond_if7() { if ([1]) {} }
+fn i_cond_if8() { if (u_void()) {} }
+
+fn v_cond_assert1() { assert(1); }
+fn v_cond_assert2() { assert(0); }
+fn v_cond_assert3() { assert(0 as *void); }
+fn v_cond_assert4() { assert(0 as *int); }
+fn v_cond_assert5() { assert(u_void); }
+fn i_cond_assert6() { assert(Something); }
+fn i_cond_assert7() { assert([1]); }
+fn i_cond_assert8() { assert(u_void()); }
+
+fn v_cond_while1() { while(1) {} }
+fn v_cond_while2() { while(0) {} }
+fn v_cond_while3() { while(0 as *void) {} }
+fn v_cond_while4() { while(0 as *int) {} }
+fn v_cond_while5() { while(u_void) {} }
+fn i_cond_while6() { while(Something) {} }
+fn i_cond_while7() { while([1]) {} }
+fn i_cond_while8() { while(u_void()) {} }
+
+fn v_cond_for1() { for(;1;) {} }
+fn v_cond_for2() { for(;0;) {} }
+fn v_cond_for3() { for(;0 as *void;) {} }
+fn v_cond_for4() { for(;0 as *int;) {} }
+fn v_cond_for5() { for(;u_void;) {} }
+fn i_cond_for6() { for(;Something;) {} }
+fn i_cond_for7() { for(;[1];) {} }
+fn i_cond_for8() { for(;u_void();) {} }
+
+fn v_cond_ternary1() { 1 ? 0 : 1; }
+fn v_cond_ternary2() { 0 ? 0 : 1; }
+fn v_cond_ternary3() { 0 as *void ? 0 : 1; }
+fn v_cond_ternary4() { 0 as *int ? 0 : 1; }
+fn v_cond_ternary5() { u_void ? 0 : 1; }
+fn i_cond_ternary6() { Something ? 0 : 1; }
+fn i_cond_ternary7() { [1] ? 0 : 1; }
+fn i_cond_ternary8() { u_void() ? 0 : 1; }
+
+fn v_return1() { return; }
+fn i_return2() -> int { return; }
+fn v_return3() -> int { return 1; }
+fn i_return4() -> *int { return 1; }
+fn v_return5() -> *int { return 1 as *int; }
+fn v_return6() -> *int { return nullptr; }
+fn v_return7() -> *void {return 1 as *int;}
+
+fn v_vardecl0() {
+    let x: fn() = nullptr;
+    x = nullptr;
+}
+fn v_vardecl1() {
+    let x: int = 5;
+    {
+        let x: *int = &x;
+    }
+}
+fn i_vardecl2() {
+    let x: int = 5;
+    let x: *int = &x;
+}
+fn v_vardecl3() {
+    {
+        let x: int = 5;
+    }
+    let x: int = 5;
+}
+fn i_vardecl4() {
+    let x: int = 5;
+    if (1) let x: int = 5;
+}
+fn i_vardecl5() {
+    let x: int = x;
+}
+fn i_vardecl6(x: int) {
+    let x: int = 5;
+}
+fn v_vardecl7(x: int) {
+    {
+        let x: int = x;
+    }
+}
+fn i_vardecl8() {
+    x = 10;
+    let x: int = 10;
+}
+fn i_vardecl9() {
+    if (1) {
+        let x: int = 10;
+    } else {
+        let y: int = x;
+    }
+}
+fn i_vardecl10() {
+    if (1) {
+        let x: int = 10;
+    }
+    x;
+}
+fn v_vardecl11() {
+    while (1) let x: int = 5;
+}
+
+fn v_vardecl12() {
+    let a: int = 1;
+    let b: *int = 1 as *int;
+    let c: *void = b;
+    let d: *int = c;
+    let e: **int = c;
+    let f: *Struct = c;
+    let g: Struct = Struct { x: 10 };
+    let h: [int; 2] = [1, 2];
+    let i: *[int; 2] = c;
+    let j: *[int; 2] = a as *[int; 2];
+    let k: fn() -> noalias* int;
+    let l: fn() -> *int = k;
+    let n: fn(*int);
+    let m: fn(noalias* int) = n;
+}
+fn i_vardecl13() {
+    let a: fn() -> *int;
+    let b: fn() -> noalias* int = b;
+}
+fn i_vardecl14() {
+    let a: fn(noalias* int);
+    let b: fn(*int) = a;
+}
+fn i_vardecl15() {
+    let a: fn(*int);
+    let b: fn(*void) = a;
+}
+fn i_vardecl15() {
+    let a: fn(*void);
+    let b: fn(*int) = a;
+}
+fn i_vardecl16() {
+    let a: fn() -> *void;
+    let b: fn() -> *int = a;
+}
+fn i_vardecl16() {
+    let a: fn() -> *int;
+    let b: fn() -> *void = a;
+}
+fn i_vardecl17() { let a: int = nullptr; }
+fn i_vardecl18() { let a: *int = 1; }
+fn i_vardecl19() { let a: *Struct = Struct {x: 10}; }
+fn i_vardecl20() { let a: [int; 3] = [1, 2, 3, 4]; }
+fn i_vardecl21() { let a: [*int; 1] = []; }
+fn i_vardecl22() { let a: [*int; 1] = [nullptr]; }
+fn v_vardecl23() { let a: [*int; 1] = [nullptr as *int]; }
+fn v_vardecl24() {let f: fn() = v_vardecl24; }
+fn v_vardecl25(i: int) {let f: fn(int) = v_vardecl25; }
+fn v_cast1() {
+    let a: *int = 1 as *int;
+    let b: *void = 1 as *void;
+    let c: int = 1 as int;
+    let d: fn() = 1 as fn();
+    let e: fn(noalias *noalias*noalias*Struct) -> noalias*int =
+        1 as fn(noalias *noalias*noalias*Struct) -> noalias*int;
+    a = nullptr as *int;
+    b = nullptr as *void;
+    c = nullptr as int;
+    e = nullptr as fn(noalias *noalias*noalias*Struct) -> noalias*int;
+    let f: *[int; 5] = nullptr as *[int; 5];
+}
+fn i_cast2() {
+    1 as Struct;
+}
+fn i_cast3() {
+    1 as [int; 1];
+}
+fn i_cast4() {
+    Struct {x: 10} as int;
+}
+fn i_cast5() {
+    [1, 2, 3] as int;
+}
+fn v_ident1() {
+    let x: int = 5;
+    x = x;
+}
+fn v_ident2() {
+    let x: int = 5;
+    {
+        x = x;
+    }
+}
+fn v_ident3() {
+    let x: int = 5;
+    {
+        let x: int = 15;
+        x = x;
+    }
+    x = x;
+}
+fn v_ident4(x: int) {
+    x = x;
+}
+fn i_ident5() {
+    x = x;
+}
+fn i_ident8() {
+    {
+        let x: int = 5;
+    }
+    x = x;
+}
+fn v_ternary1() { let x: int = 1 ? 1 : 0; }
+fn v_ternary2() { let x: *void = 1 ? nullptr : nullptr; }
+fn v_ternary3() { let x: Struct = 1 ? Struct {x: 10} : Struct {x: 12}; }
+fn v_ternary4() { let x: [int; 1] = 1 ? [1] : [2]; }
+fn v_ternary5() { let x: *void = nullptr ? nullptr : nullptr; }
+fn i_ternary6() { 1 ? nullptr : 0; }
+fn i_ternary7() { 1 ? 1 as *int : nullptr; }
+
+fn i_funccall1() { 1(); }
+fn i_funccall2() { nullptr(); }
+fn v_funccall3() { u_void(); }
+fn v_funccall3() { let x: int = u_fn1(1); }
+fn i_funccall4() { u_fn1(); }
+fn i_funccall5() { u_fn1(1, 2); }
+fn i_funccall6() { u_fn1(nullptr); }
+fn i_funccall7() { u_fn1(1 as *int); }
+
+fn v_funccall8() { let x: *void = u_fn2(nullptr); }
+fn i_funccall9() { u_fn2(); }
+fn i_funccall10() { u_fn2(nullptr, nullptr); }
+fn i_funccall11() { u_fn2(1); }
+
+fn v_funccall12() { let x: *int = u_fn3(1 as *int); }
+fn i_funccall13() { u_fn3(); }
+fn i_funccall14() { u_fn3(1 as *int, 2 as *int); }
+fn i_funccall15() { u_fn3(1); }
+
+fn v_index1() { let x: int = (1 as *int)[1]; }
+fn v_index2() { let s: Struct = (1 as *Struct)[1]; }
+fn v_index3() { let x: int = ([1, 2, 3])[1]; }
+fn v_index4() { let s: Struct = ([Struct {x: 10}])[1]; }
+
+fn i_index5() { 1[1]; }
+fn i_index6() { Struct {x: 1}[1]; }
+fn i_index7() { [1, 2, 3][nullptr]; }
+fn i_index8() { [1, 2, 3][[1, 2, 3]]; }
+fn i_index8() { [1, 2, 3][Struct {x: nullptr as int}]; }
+
+fn i_sinit1() { NonExistent {x: 1}; }
+fn i_sinit2() { Struct {y: 1}; }
+fn i_sinit3() { Struct {x: nullptr}; }
+fn v_sinit4() { let x: BigStruct = BigStruct { a: 1 }; }
+fn v_sinit5() { let x: BigStruct = BigStruct { a: 1, b: nullptr }; }
+fn v_sinit6() { let x: BigStruct = BigStruct { a: 1, c: nullptr }; }
+// Should be caught in astvalidation. Here we check non-crashing
+fn v_sinit7() { let x: BigStruct = BigStruct { a: 1, c: nullptr, c: nullptr, c: nullptr, }; }
+fn v_sinit8() { let x: BigStruct = BigStruct {}; }
+
+fn v_ainit1() { let x: [int; 2] = [1, 2]; }
+fn v_ainit2(x: int) { let y: [int; 2] = [x, x]; }
+fn i_ainit3() { []; }
+fn i_ainit4() { [1, nullptr]; }
+fn i_ainit4() { [1 as *int, nullptr]; }
+fn i_ainit4() { [nullptr, 1 as *int]; }
+
+fn v_memberaccess(s: BigStruct) {
+    let a: int = s.a;
+    let b: *int = s.b;
+    let c: *int = s.c;
+}
+fn v_memberaccess() {
+    let a: int = bs.a;
+    let b: *int = bs.b;
+    let c: *int = bs.c;
+}
+fn i_memberaccess1() {
+    bsp.a;
+}
+fn i_memberaccess2() {
+    bs.d;
+}
+fn i_memberaccess3() {
+    1.something;
+}
+
+fn v_ptr_memberaccess(s: *BigStruct) {
+    let a: int = s->a;
+    let b: *int = s->b;
+    let c: *int = s->c;
+}
+fn v_ptr_memberaccess() {
+    let a: int = bsp->a;
+    let b: *int = bsp->b;
+    let c: *int = bsp->c;
+}
+fn i_ptr_memberaccess1() {
+    bs->a;
+}
+fn i_ptr_memberaccess2() {
+    bsp->d;
+}
+fn i_ptr_memberaccess3() {
+    1->something;
+}
+
+fn v_add1() {
+    let a: int = 10 + 10;
+    let b: *int = 1 as *int + 1;
+    let c: *int = 1 + 1 as *int;
+    let d: *void = 1 + nullptr;
+}
+fn i_add2() {
+    nullptr + nullptr;
+}
+fn i_add3() {
+    1 as *Struct + Struct {x: 10};
+}
+fn v_sub1() {
+    let a: int = 10 - 10;
+    let b: *int = 1 as *int - 1;
+    let c: *void = nullptr - 1;
+    let d: int = nullptr - nullptr;
+    let e: int = 1 as *int - 2 as *int;
+}
+fn i_sub2() {
+    1 - nullptr;
+}
+fn i_sub3() {
+    Struct {x: 10} - 1;
+}
+fn i_sub4() {
+    nullptr - (1 as *int);
+}
+fn v_mul1() { let a: int = 1*1; }
+fn i_mul2() { nullptr*1; }
+fn i_mul3() { 1*nullptr; }
+fn i_mul4() { Struct {x: 10}*1; }
+fn v_mulassign1() { let a: int = 1; let b: int = a *= 1; }
+fn i_mulassign2() { let a: *void = 1; a *= 1; }
+fn i_mulassign4() { 1 *= 1; }
+
+fn v_div1() { let a: int = 1/1; }
+fn i_div2() { nullptr/1; }
+fn i_div3() { 1/nullptr; }
+fn i_div4() { Struct {x: 10}/1; }
+fn v_divassign1() { let a: int = 1; let b: int = a /= 1; }
+fn i_divassign2() { let a: *void = 1; a /= 1; }
+fn i_divassign4() { 1 /= 1; }
+
+fn v_mod1() { let a: int = 1%1; }
+fn i_mod2() { nullptr%1; }
+fn i_mod3() { 1%nullptr; }
+fn i_mod4() { Struct {x: 10}%1; }
+fn v_modassign1() { let a: int = 1; let b: int = a %= 1; }
+fn i_modassign2() { let a: *void = 1; a %= 1; }
+fn i_modassign4() { 1 %= 1; }
+
+fn v_bitor1() { let a: int = 1|1; }
+fn i_bitor2() { nullptr|1; }
+fn i_bitor3() { 1|nullptr; }
+fn i_bitor4() { Struct {x: 10}|1; }
+fn v_bitorassign1() { let a: int = 1; let b: int = a |= 1; }
+fn i_bitorassign2() { let a: *void = 1; a |= 1; }
+fn i_bitorassign4() { 1 |= 1; }
+
+fn v_bitand1() { let a: int = 1&1; }
+fn i_bitand2() { nullptr&1; }
+fn i_bitand3() { 1&nullptr; }
+fn i_bitand4() { Struct {x: 10}&1; }
+fn v_bitandassign1() { let a: int = 1; let b: int = a &= 1; }
+fn i_bitandassign2() { let a: *void = 1; a &= 1; }
+fn i_bitandassign4() { 1 &= 1; }
+
+fn v_xor1() { let a: int = 1^1; }
+fn i_xor2() { nullptr^1; }
+fn i_xor3() { 1^nullptr; }
+fn i_xor4() { Struct {x: 10}^1; }
+fn v_xorassign1() { let a: int = 1; let b: int = a ^= 1; }
+fn i_xorassign2() { let a: *void = 1; a ^= 1; }
+fn i_xorassign4() { 1 ^= 1; }
+
+fn v_lt1() { let a: int = 1 < 2; }
+fn v_lt2() { let a: int = nullptr < nullptr; }
+fn i_lt3() { nullptr < 1; }
+fn i_lt4() { 1 < nullptr; }
+fn i_lt5() { 1 < Struct {}; }
+fn i_lt6() { 1 < [1, 2]; }
+
+fn v_gt1() { let a: int = 1 > 2; }
+fn v_gt2() { let a: int = nullptr > nullptr; }
+fn i_gt3() { nullptr > 1; }
+fn i_gt4() { 1 > nullptr; }
+fn i_gt5() { 1 > Struct {}; }
+fn i_gt6() { 1 > [1, 2]; }
+
+fn v_lte1() { let a: int = 1 <= 2; }
+fn v_lte2() { let a: int = nullptr <= nullptr; }
+fn i_lte3() { nullptr <= 1; }
+fn i_lte4() { 1 <= nullptr; }
+fn i_lte5() { 1 <= Struct {}; }
+fn i_lte6() { 1 <= [1, 2]; }
+
+fn v_gte1() { let a: int = 1 >= 2; }
+fn v_gte2() { let a: int = nullptr >= nullptr; }
+fn i_gte3() { nullptr >= 1; }
+fn i_gte4() { 1 >= nullptr; }
+fn i_gte5() { 1 >= Struct {}; }
+fn i_gte6() { 1 >= [1, 2]; }
+
+fn v_eq1() { let a: int = u_void == nullptr; }
+fn v_eq2() { let a: int = nullptr == u_void; }
+fn v_eq3() { let a: int = u_void == u_void; }
+fn v_eq4() { let a: int = nullptr == nullptr; }
+fn v_eq5() { let a: int = 1 == 1; }
+fn i_eq6() { Struct {} == Struct {}; }
+fn i_eq7() { [1] == [2]; }
+
+fn v_neq1() { let a: int = u_void != nullptr; }
+fn v_neq2() { let a: int = nullptr != u_void; }
+fn v_neq3() { let a: int = u_void != u_void; }
+fn v_neq4() { let a: int = nullptr != nullptr; }
+fn v_neq5() { let a: int = 1 != 1; }
+fn i_neq6() { Struct {} != Struct {}; }
+fn i_neq7() { [1] != [2]; }
+
+fn v_and1() { let a: int = 1 && 1; }
+fn v_and2() { let a: int = 1 && nullptr; }
+fn v_and3() { let a: int = 1 && u_void; }
+fn v_and4() { let a: int = nullptr && 1; }
+fn v_and5() { let a: int = nullptr && nullptr; }
+fn v_and6() { let a: int = nullptr && u_void; }
+fn v_and7() { let a: int = u_void && 1; }
+fn v_and8() { let a: int = u_void && nullptr; }
+fn v_and9() { let a: int = u_void && u_void; }
+fn i_and10() { Struct {} && 1; }
+fn i_and11() { [1] && 1; }
+
+fn v_addassign1() { let a: int = 1; let b: int = a += 1; }
+fn v_addassign2() { let a: *int = nullptr; let b: *int = a += 2; }
+fn v_addassign2() { let a: *void = nullptr; let b: *void = a += 2; }
+fn i_addassign3() { let a: Struct; a += 1; }
+fn i_addassign3() { let a: [int; 2]; a += 1; }
+fn i_addassign4() { 1 += 1; }
+
+fn v_subassign1() { let a: int = 1; let b: int = a -= 1; }
+fn v_subassign2() { let a: *int = nullptr; let b: *int = a -= 2; }
+fn v_subassign2() { let a: *void = nullptr; let b: *void = a -= 2; }
+fn i_subassign3() { let a: Struct; a -= 1; }
+fn i_subassign3() { let a: [int; 2]; a -= 1; }
+fn i_subassign4() { 1 -= 1; }
+
+fn v_assign1() { let a: int; a = 10; }
+fn i_assign2() { let a: int; a = nullptr; }
+fn v_assign3() { let a: *int; a = nullptr; }
+fn i_assign4() { 1 = 10; }
+
+fn v_postincr1() { let a: int; a = a++; }
+fn v_postincr2() { let a: *int; a = a++; }
+fn v_postincr3() { let a: *void; a = a++; }
+fn i_postincr4() { let a: Struct; a++; }
+fn i_postincr5() { let a: [int; 2]; a++; }
+fn i_postincr6() { let a: fn(); a++; }
+fn i_postincr7() { 1++; }
+
+fn v_postdecr1() { let a: int; a = a--; }
+fn v_postdecr2() { let a: *int; a = a--; }
+fn v_postdecr3() { let a: *void; a = a--; }
+fn i_postdecr4() { let a: Struct; a--; }
+fn i_postdecr5() { let a: [int; 2]; a--; }
+fn i_postdecr6() { let a: fn(); a--; }
+fn i_postdecr7() { 1--; }
+
+fn v_preincr1() { let a: int; a = ++a; }
+fn v_preincr2() { let a: *int; a = ++a; }
+fn v_preincr3() { let a: *void; a = ++a; }
+fn i_preincr4() { let a: Struct; ++a; }
+fn i_preincr5() { let a: [int; 2]; ++a; }
+fn i_preincr6() { let a: fn(); ++a; }
+fn i_preincr7() { ++1; }
+
+fn v_predecr1() { let a: int; a = --a; }
+fn v_predecr2() { let a: *int; a = --a; }
+fn v_predecr3() { let a: *void; a = --a; }
+fn i_predecr4() { let a: Struct; --a; }
+fn i_predecr5() { let a: [int; 2]; --a; }
+fn i_predecr6() { let a: fn(); --a; }
+fn i_predecr7() { --1; }
+
+fn v_unary1() { let a: int = +-+ +- -+1; }
+fn i_unary2() { -nullptr; }
+fn i_unary3() { +nullptr; }
+fn i_unary4() { +Struct {}; }
+fn i_unary5() { +[10]; }
+fn i_unary6() { -Struct {}; }
+fn i_unary7() { -[10]; }
+
+fn v_not1() { let a: int = !1; }
+fn v_not3() { let a: int = !0 as *void; }
+fn v_not4() { let a: int = !0 as *int; }
+fn v_not5() { let a: int = !u_void; }
+fn i_not6() { let a: int = !Something; }
+fn i_not7() { let a: int = ![1]; }
+fn i_not8() { let a: int = !u_void(); }
+
+fn v_bitnot1() { let a: int = ~1; }
+fn i_bitnot3() { let a: int = ~0 as *void; }
+fn i_bitnot4() { let a: int = ~0 as *int; }
+fn i_bitnot5() { let a: int = ~u_void; }
+fn i_bitnot6() { let a: int = ~Something; }
+fn i_bitnot7() { let a: int = ~[1]; }
+fn i_bitnot8() { let a: int = ~u_void(); }
+
+fn v_deref() { let a: int = *1 as *int; }
+fn v_deref() { let a: int; a = *&a; }
+fn i_deref() { *5; }
+fn i_deref() { *Struct {}; }
+fn i_deref() { *[1]; }
+fn i_deref() { *u_void(); }
+
+fn v_addr() { let a: int; let b: *int = &a; }
+fn v_addr() { let a: *int; let b: **int = &a; }
+fn v_addr() { let a: Struct; let b: *Struct = &a; }
+fn v_addr() { let a: [int; 2]; let b: *[int ;2] = &a; }
+fn i_addr() { &1; }
+fn i_addr() { &Struct {}; }
+fn v_addr(i: int) {&i;}

@@ -25,8 +25,6 @@ pub enum KeywordKind {
     Void,
     Let,
     NoAlias,
-
-    #[cfg(test)]
     Assert,
 }
 #[derive(Clone, Debug, PartialEq)]
@@ -190,6 +188,7 @@ impl<'a> Lexer<'a> {
             "void" => TokenKind::Keyword(KeywordKind::Void),
             "let" => TokenKind::Keyword(KeywordKind::Let),
             "noalias" => TokenKind::Keyword(KeywordKind::NoAlias),
+            "assert" => TokenKind::Keyword(KeywordKind::Assert),
             _ => TokenKind::Ident(ctx.intern_symbol(s)),
         };
         self.tokens.push(Token { kind, span });
@@ -467,6 +466,8 @@ fn test_lexer() {
     test("continue", TokenKind::Keyword(KeywordKind::Continue));
     test("void", TokenKind::Keyword(KeywordKind::Void));
     test("let", TokenKind::Keyword(KeywordKind::Let));
+    test("noalias", TokenKind::Keyword(KeywordKind::NoAlias));
+    test("assert", TokenKind::Keyword(KeywordKind::Assert));
 
     test_ident("hello");
     test_ident("hi");

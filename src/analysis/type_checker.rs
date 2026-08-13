@@ -370,25 +370,23 @@ impl<'a> TypeChecker<'a> {
             StmtKind::ReturnStmt(return_stmt) => {
                 let value = return_stmt.value;
                 let span = return_stmt.span;
-                let ret_type = if let Some(expr) = value {
+                let ret_type_info = if let Some(expr) = value {
                     if let Some(typ) = self.check_expr(expr) {
-                        Some(typ)
+                        typ
                     } else {
                         return;
                     }
                 } else {
-                    None
+                    ExprTypeInfo::new(self.ctx.intern_type(Type::Void), false)
                 };
-                if let Some(ret_type_info) = ret_type {
-                    let ret_type = self.ctx.get_type(ret_type_info.id);
-                    let func_ret_type = self.ctx.get_type(func_ret);
-                    if !ret_type.is_assignable_to(func_ret_type, self.ctx) {
-                        self.errors.push(TypeCheckError::InvalidReturnType {
-                            expected: func_ret,
-                            found: ret_type_info.id,
-                            span,
-                        })
-                    }
+                let ret_type = self.ctx.get_type(ret_type_info.id);
+                let func_ret_type = self.ctx.get_type(func_ret);
+                if !ret_type.is_assignable_to(func_ret_type, self.ctx) {
+                    self.errors.push(TypeCheckError::InvalidReturnType {
+                        expected: func_ret,
+                        found: ret_type_info.id,
+                        span,
+                    })
                 }
             }
             StmtKind::VariableDeclaration(variable_declaration) => {
@@ -552,7 +550,10 @@ impl<'a> TypeChecker<'a> {
         let index = self.check_expr(array_index.index);
         let elem_type = if let Some(arr) = &arr {
             let typ = self.ctx.get_type(arr.id);
-            if let Some(indexed) = typ.indexed_type() {
+            if let Some(indexed) = typ.indexed_type()
+                && let typ = self.ctx.get_type(indexed)
+                && !typ.is_void()
+            {
                 Some(indexed)
             } else {
                 let span = self.ctx.get_expr(array_index.array).span;
@@ -750,7 +751,14 @@ impl<'a> TypeChecker<'a> {
         match &expr.kind {
             ExprKind::Nullptr(nullptr) => {
                 let id = nullptr.id;
-                let expr_type_info = ExprTypeInfo::new(self.ctx.intern_type(Type::Void), false);
+                let void = self.ctx.intern_type(Type::Void);
+                let expr_type_info = ExprTypeInfo::new(
+                    self.ctx.intern_type(Type::Ptr {
+                        pointee: void,
+                        noalias: false,
+                    }),
+                    false,
+                );
                 self.type_table.insert(id, expr_type_info);
                 Some(expr_type_info)
             }
@@ -774,7 +782,7 @@ impl<'a> TypeChecker<'a> {
                 self.type_table.insert(id, expr_type_info);
                 Some(expr_type_info)
             }
-            // Ideally we don't need to clone here, but alas, we must, due to lifetimes
+            // Ideally we don't need to clone these, but alas, we must, due to lifetimes
             ExprKind::FunctionCall(function_call) => {
                 self.check_function_call(function_call.clone())
             }
@@ -1058,8 +1066,8 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             PrefixOpKind::Not => {
-                if matches!(expr_typ, Type::Int | Type::Ptr { .. }) {
-                    self.ctx.intern_type(Type::Void)
+                if expr_typ.is_intlike() {
+                    self.ctx.intern_type(Type::Int)
                 } else {
                     self.errors.push(TypeCheckError::InvalidPrefixOpType {
                         expr_id,
@@ -1071,7 +1079,7 @@ impl<'a> TypeChecker<'a> {
             }
             PrefixOpKind::BitNot => {
                 if matches!(expr_typ, Type::Int) {
-                    self.ctx.intern_type(Type::Void)
+                    self.ctx.intern_type(Type::Int)
                 } else {
                     self.errors.push(TypeCheckError::InvalidPrefixOpType {
                         expr_id,
@@ -1117,6 +1125,9 @@ impl<'a> TypeChecker<'a> {
 
 impl Type {
     pub fn is_assignable_to(&self, other: &Self, ctx: &Context) -> bool {
+        self.is_assignable_to_inner(other, ctx, false)
+    }
+    pub fn is_assignable_to_inner(&self, other: &Self, ctx: &Context, no_void_conv: bool) -> bool {
         if self == other {
             return true;
         }
@@ -1137,8 +1148,13 @@ impl Type {
                 let alias_ok = !n2 || *n1;
                 let t1 = ctx.get_type(*p1);
                 let t2 = ctx.get_type(*p2);
-                let void_conversion = t1 == &Type::Void || t2 == &Type::Void;
+                let void_conversion = !no_void_conv && (t1 == &Type::Void || t2 == &Type::Void);
                 alias_ok && (void_conversion || t1 == t2)
+            }
+            (Type::Ptr { pointee, .. }, Type::FuncPtr { .. })
+                if let Type::Void = ctx.get_type(*pointee) =>
+            {
+                true
             }
 
             (
@@ -1156,7 +1172,7 @@ impl Type {
                 }
                 let r1 = ctx.get_type(*r1);
                 let r2 = ctx.get_type(*r2);
-                let ret_type_matches = r1.is_assignable_to(r2, ctx);
+                let ret_type_matches = r1.is_assignable_to_inner(r2, ctx, true);
                 if !ret_type_matches {
                     return false;
                 }
@@ -1164,7 +1180,7 @@ impl Type {
                     let t1 = ctx.get_type(*id1);
                     let t2 = ctx.get_type(*id2);
                     // Parameter types are contravariant, not covariant
-                    t2.is_assignable_to(t1, ctx)
+                    t2.is_assignable_to_inner(t1, ctx, true)
                 })
             }
             _ => false,
@@ -1172,5 +1188,78 @@ impl Type {
     }
     fn is_castable_to(&self, other: &Self) -> bool {
         self.is_intlike() && other.is_intlike()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        analysis::symbol_table::SymbolTableBuilder,
+        syntax::{
+            ast::{GlobalDeclarationKind, Program},
+            context::Context,
+            lexer::Lexer,
+            parser::Parser,
+        },
+    };
+
+    #[test]
+    fn test_type_check() {
+        let page = std::fs::read_to_string("testfiles/type_check.y86").unwrap();
+        let mut ctx = Context::new();
+        let lexed = Lexer::lex(&page, &mut ctx);
+        assert!(!lexed.has_errors());
+        let parsed = Parser::parse_test(&lexed.tokens, &mut ctx);
+        assert!(!parsed.has_errors());
+        let program = parsed.program;
+        let mut globals = Vec::new();
+        let mut funcs = Vec::new();
+        for decl in program.decls {
+            match decl.kind {
+                GlobalDeclarationKind::Variable(_) => globals.push(decl),
+                GlobalDeclarationKind::Struct(_) => globals.push(decl),
+                GlobalDeclarationKind::Function(ref f) => {
+                    let s = ctx.get_symbol(f.name.sym);
+                    if s.starts_with('u') {
+                        globals.push(decl);
+                    } else {
+                        funcs.push(decl);
+                    }
+                }
+            }
+        }
+        for func in funcs {
+            let mut program = Program { decls: Vec::new() };
+            let GlobalDeclarationKind::Function(f) = &func.kind else {
+                unreachable!();
+            };
+            for decl in globals.clone() {
+                program.decls.push(decl);
+            }
+            let s = ctx.get_symbol(f.name.sym);
+            let is_valid = if s.starts_with('v') {
+                true
+            } else if s.starts_with('i') {
+                false
+            } else {
+                panic!("Function {s} doesn't start with v or i");
+            };
+            println!("Testing function {s}");
+            program.decls.push(func);
+            let symbol_table_output = SymbolTableBuilder::build(&program, &mut ctx);
+            assert!(symbol_table_output.errors.is_empty());
+            let symbol_table = symbol_table_output.symbol_table;
+            let type_check_output = TypeChecker::check(&mut ctx, &symbol_table, &program);
+            if is_valid {
+                assert!(
+                    type_check_output.errors.is_empty(),
+                    "{:?}",
+                    type_check_output.errors
+                );
+            } else {
+                assert!(!type_check_output.errors.is_empty());
+            }
+        }
     }
 }

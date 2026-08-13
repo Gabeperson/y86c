@@ -342,7 +342,7 @@ mod tests {
         let mut ctx = Context::new();
         let lexed = Lexer::lex(s, &mut ctx);
         assert!(!lexed.has_errors());
-        let parsed = Parser::parse(&lexed.tokens, &mut ctx);
+        let parsed = Parser::parse_test(&lexed.tokens, &mut ctx);
         assert!(!parsed.has_errors());
         let validation_errors = ASTValidator::validate(&parsed.program, no_main, &ctx);
         assert_eq!(

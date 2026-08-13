@@ -47,6 +47,7 @@ pub struct Parser<'t> {
     errors: Vec<ParsingError>,
     cursor: usize,
     id: u64,
+    testing: bool,
 }
 
 #[derive(Debug)]
@@ -62,6 +63,11 @@ impl ParseOutput {
 }
 
 impl<'t> Parser<'t> {
+    pub fn parse_test(tokens: &'t Vec<Token>, ctx: &mut Context) -> ParseOutput {
+        let mut parser = Parser::new(tokens);
+        parser.testing = true;
+        parser.parse_inner(ctx)
+    }
     pub fn parse(tokens: &'t Vec<Token>, ctx: &mut Context) -> ParseOutput {
         let parser = Parser::new(tokens);
         parser.parse_inner(ctx)
@@ -72,6 +78,7 @@ impl<'t> Parser<'t> {
             errors: Vec::new(),
             cursor: 0,
             id: 0,
+            testing: false,
         }
     }
     fn parse_inner(mut self, ctx: &mut Context) -> ParseOutput {
@@ -266,8 +273,7 @@ impl<'t> Parser<'t> {
                 let kind = StmtKind::VariableDeclaration(decl);
                 Stmt { kind, span, id }
             }
-            #[cfg(test)]
-            TokenKind::Keyword(KeywordKind::Assert) => self.parse_assert(ctx)?,
+            TokenKind::Keyword(KeywordKind::Assert) if self.testing => self.parse_assert(ctx)?,
             _ => {
                 let expr = self.parse_expr(ctx)?;
                 let span = expr.span;
@@ -452,7 +458,6 @@ impl<'t> Parser<'t> {
         }
         Ok((typ, Span::new(token.span.start, span.end)))
     }
-    #[cfg(test)]
     fn parse_assert(&mut self, ctx: &mut Context) -> Result<Stmt> {
         let token = self.current()?;
         self.advance();
@@ -1060,7 +1065,7 @@ fn postfix_binding_power(token: &TokenKind) -> Option<(u8, ())> {
     Some(match token {
         TokenKind::LParen | TokenKind::LSquare | TokenKind::Period | TokenKind::Arrow => (200, ()),
         TokenKind::DoublePlus | TokenKind::DoubleMinus => (140, ()),
-        TokenKind::Keyword(KeywordKind::As) => (120, ()),
+        TokenKind::Keyword(KeywordKind::As) => (150, ()),
         _ => return None,
     })
 }
@@ -3152,7 +3157,7 @@ mod tests {
         use utils::*;
         let mut ctx = ctx();
         let lexed = lex(s, &mut ctx);
-        let parsed = Parser::parse(&lexed, &mut ctx);
+        let parsed = Parser::parse_test(&lexed, &mut ctx);
         assert!(!parsed.has_errors());
         assert!(parsed.program.ctx_eq(&expected, &ctx));
     }
@@ -3205,7 +3210,7 @@ mod tests {
         for s in fails {
             let mut ctx = ctx();
             let lexed = lex(s, &mut ctx);
-            let parsed = Parser::parse(&lexed, &mut ctx);
+            let parsed = Parser::parse_test(&lexed, &mut ctx);
             assert!(parsed.has_errors());
         }
     }

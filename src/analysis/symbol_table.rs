@@ -268,7 +268,7 @@ mod tests {
     fn build(s: &str, ctx: &mut Context) -> SymbolTableBuildOutput {
         let res = Lexer::lex(s, ctx);
         assert!(res.errors.is_empty());
-        let res = Parser::parse(&res.tokens, ctx);
+        let res = Parser::parse_test(&res.tokens, ctx);
         assert!(res.errors.is_empty());
         let validation = ASTValidator::validate(&res.program, true, ctx);
         assert!(validation.is_empty());

@@ -60,10 +60,16 @@ impl Context {
     }
 }
 
-#[derive(Debug, Eq)]
+#[derive(Eq)]
 pub struct Id<T> {
     index: NonZeroU32,
     _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> std::fmt::Debug for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Id").field(&self.index).finish()
+    }
 }
 
 impl<T> Hash for Id<T> {
