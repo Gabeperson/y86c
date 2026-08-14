@@ -1,18 +1,25 @@
 use std::hash::Hash;
-use std::marker::PhantomData;
-use std::num::NonZeroU32;
 
-use ahash::AHashMap;
 use smol_str::SmolStr;
 
+use crate::common::symbol::*;
 use crate::syntax::ast::{Expr, Stmt, Type};
+
+pub mod arenas {
+    use super::*;
+    use crate::common::interner::define_arena;
+    define_arena!(Type, TypeId, TypeArena; dedup);
+    define_arena!(Expr, ExprId, ExprArena);
+    define_arena!(Stmt, StmtId, StmtArena);
+}
+pub use arenas::*;
 
 #[derive(Debug)]
 pub struct Context {
-    symbol_interner: Interner<SmolStr>,
-    type_interner: Interner<Type>,
-    expr_interner: Interner<Expr>,
-    stmt_interner: Interner<Stmt>,
+    symbol_interner: SymbolArena,
+    type_interner: TypeArena,
+    expr_interner: ExprArena,
+    stmt_interner: StmtArena,
 }
 
 impl Default for Context {
@@ -24,180 +31,34 @@ impl Default for Context {
 impl Context {
     pub fn new() -> Self {
         Self {
-            symbol_interner: Interner::new(),
-            type_interner: Interner::new(),
-            expr_interner: Interner::new(),
-            stmt_interner: Interner::new(),
+            symbol_interner: SymbolArena::new(),
+            type_interner: TypeArena::new(),
+            expr_interner: ExprArena::new(),
+            stmt_interner: StmtArena::new(),
         }
     }
     pub fn intern_symbol(&mut self, s: &str) -> Symbol {
-        let id = self.symbol_interner.intern_deduplicated(SmolStr::new(s));
-        Symbol(id)
+        self.symbol_interner.intern_deduplicated(SmolStr::new(s))
     }
     pub fn get_symbol(&self, s: Symbol) -> &str {
-        self.symbol_interner.get(s.0)
+        self.symbol_interner.get(s)
     }
     pub fn intern_type(&mut self, typ: Type) -> TypeId {
-        let id = self.type_interner.intern_deduplicated(typ);
-        TypeId(id)
+        self.type_interner.intern_deduplicated(typ)
     }
     pub fn get_type(&self, id: TypeId) -> &Type {
-        self.type_interner.get(id.0)
+        self.type_interner.get(id)
     }
     pub fn intern_expr(&mut self, expr: Expr) -> ExprId {
-        let id = self.expr_interner.intern(expr);
-        ExprId(id)
+        self.expr_interner.intern(expr)
     }
     pub fn get_expr(&self, id: ExprId) -> &Expr {
-        self.expr_interner.get(id.0)
+        self.expr_interner.get(id)
     }
     pub fn intern_stmt(&mut self, stmt: Stmt) -> StmtId {
-        let id = self.stmt_interner.intern(stmt);
-        StmtId(id)
+        self.stmt_interner.intern(stmt)
     }
     pub fn get_stmt(&self, id: StmtId) -> &Stmt {
-        self.stmt_interner.get(id.0)
+        self.stmt_interner.get(id)
     }
 }
-
-#[derive(Eq)]
-pub struct Id<T> {
-    index: NonZeroU32,
-    _marker: PhantomData<fn() -> T>,
-}
-
-impl<T> std::fmt::Debug for Id<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_tuple("Id").field(&self.index).finish()
-    }
-}
-
-impl<T> Hash for Id<T> {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.index.hash(state);
-        self._marker.hash(state);
-    }
-}
-
-impl<T> PartialEq for Id<T> {
-    fn eq(&self, other: &Self) -> bool {
-        self.index == other.index && self._marker == other._marker
-    }
-}
-
-impl<T> Default for Id<T> {
-    fn default() -> Self {
-        Self {
-            index: const { NonZeroU32::new(u32::MAX).unwrap() },
-            _marker: PhantomData,
-        }
-    }
-}
-
-impl<T> Copy for Id<T> {}
-
-impl<T> Clone for Id<T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-#[derive(Clone, Debug)]
-pub struct Interner<T> {
-    map: AHashMap<T, Id<T>>,
-    arr: Vec<T>,
-}
-impl<T> Default for Interner<T> {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-impl<T> Interner<T> {
-    pub fn new() -> Self {
-        Self {
-            map: AHashMap::new(),
-            arr: Vec::new(),
-        }
-    }
-}
-impl<T: Clone + Eq + Hash> Interner<T> {
-    pub fn intern_deduplicated(&mut self, item: T) -> Id<T> {
-        if let Some(id) = self.map.get(&item) {
-            return *id;
-        }
-        let id = self.intern(item.clone());
-        self.map.insert(item, id);
-        id
-    }
-}
-
-impl<T> Interner<T> {
-    pub fn intern(&mut self, item: T) -> Id<T> {
-        self.arr.push(item);
-        let idx = self.arr.len() as u32;
-        if idx == u32::MAX {
-            panic!("More than 4 billion entries...?");
-        }
-        let nonzero = NonZeroU32::new(idx).unwrap();
-        Id {
-            index: nonzero,
-            _marker: PhantomData,
-        }
-    }
-    pub fn get(&self, id: Id<T>) -> &T {
-        if id.index.get() == u32::MAX {
-            panic!("Internal compiler error");
-        }
-        let index = (id.index.get() - 1) as usize;
-        self.arr.get(index).expect("Internal Compiler Error")
-    }
-}
-
-#[derive(Debug, Clone, Copy, Default)]
-pub struct Symbol(Id<SmolStr>);
-
-impl Eq for Symbol {}
-
-impl PartialEq for Symbol {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Hash for Symbol {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-
-#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, Default)]
-pub struct TypeId(Id<Type>);
-#[derive(Debug, Clone, Copy, Default)]
-pub struct ExprId(Id<Expr>);
-
-impl Hash for ExprId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-impl Eq for ExprId {}
-impl PartialEq for ExprId {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-#[derive(Debug, Clone, Copy, Default)]
-pub struct StmtId(Id<Stmt>);
-
-impl Hash for StmtId {
-    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
-        self.0.hash(state);
-    }
-}
-impl PartialEq for StmtId {
-    fn eq(&self, other: &Self) -> bool {
-        self.0 == other.0
-    }
-}
-
-impl Eq for StmtId {}

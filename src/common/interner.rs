@@ -1,0 +1,145 @@
+use std::{marker::PhantomData, num::NonZeroU32};
+
+use ahash::AHashMap;
+
+#[derive(Eq)]
+pub struct Id<T> {
+    index: NonZeroU32,
+    _marker: PhantomData<fn() -> T>,
+}
+
+impl<T> std::fmt::Debug for Id<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("Id").field(&self.index).finish()
+    }
+}
+
+impl<T> std::hash::Hash for Id<T> {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.index.hash(state);
+        self._marker.hash(state);
+    }
+}
+
+impl<T> PartialEq for Id<T> {
+    fn eq(&self, other: &Self) -> bool {
+        self.index == other.index && self._marker == other._marker
+    }
+}
+
+impl<T> Default for Id<T> {
+    fn default() -> Self {
+        Self {
+            index: const { NonZeroU32::new(u32::MAX).unwrap() },
+            _marker: PhantomData,
+        }
+    }
+}
+
+impl<T> Copy for Id<T> {}
+
+impl<T> Clone for Id<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Interner<T> {
+    map: AHashMap<T, Id<T>>,
+    arr: Vec<T>,
+}
+impl<T> Default for Interner<T> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+impl<T> Interner<T> {
+    pub fn new() -> Self {
+        Self {
+            map: AHashMap::new(),
+            arr: Vec::new(),
+        }
+    }
+}
+impl<T: Clone + Eq + std::hash::Hash> Interner<T> {
+    pub fn intern_deduplicated(&mut self, item: T) -> Id<T> {
+        if let Some(id) = self.map.get(&item) {
+            return *id;
+        }
+        let id = self.intern(item.clone());
+        self.map.insert(item, id);
+        id
+    }
+}
+
+impl<T> Interner<T> {
+    pub fn intern(&mut self, item: T) -> Id<T> {
+        self.arr.push(item);
+        let idx = self.arr.len() as u32;
+        if idx == u32::MAX {
+            panic!("More than 4 billion entries...?");
+        }
+        let nonzero = NonZeroU32::new(idx).unwrap();
+        Id {
+            index: nonzero,
+            _marker: PhantomData,
+        }
+    }
+    pub fn get(&self, id: Id<T>) -> &T {
+        if id.index.get() == u32::MAX {
+            panic!("Internal compiler error");
+        }
+        let index = (id.index.get() - 1) as usize;
+        self.arr.get(index).expect("Internal Compiler Error")
+    }
+}
+
+macro_rules! define_id {
+    ($typ:ident, $id:ident, $arena:ident; dedup) => {
+        $crate::common::interner::define_arena!($typ, $id, $arena);
+        impl $arena {
+            pub fn intern_deduplicated(&mut self, item: $typ) -> $id {
+                $id(self.0.intern_deduplicated(item))
+            }
+        }
+    };
+    ($typ:ident, $id:ident, $arena:ident) => {
+        #[derive(Debug, Clone, Copy, Default)]
+        pub struct $id($crate::common::interner::Id<$typ>);
+
+        impl std::hash::Hash for $id {
+            fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+                self.0.hash(state);
+            }
+        }
+        impl Eq for $id {}
+        impl PartialEq for $id {
+            fn eq(&self, other: &Self) -> bool {
+                self.0 == other.0
+            }
+        }
+        #[derive(Debug, Clone)]
+        pub struct $arena($crate::common::interner::Interner<$typ>);
+
+        impl Default for $arena {
+            fn default() -> Self {
+                Self::new()
+            }
+        }
+
+        impl $arena {
+            pub fn new() -> Self {
+                Self($crate::common::interner::Interner::new())
+            }
+            pub fn get(&self, id: $id) -> &$typ {
+                self.0.get(id.0)
+            }
+            pub fn intern(&mut self, item: $typ) -> $id {
+                $id(self.0.intern(item))
+            }
+        }
+    };
+}
+
+pub(crate) use define_id as define_arena;

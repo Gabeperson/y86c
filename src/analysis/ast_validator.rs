@@ -1,9 +1,10 @@
 use ahash::AHashMap;
 
 use crate::common::span::Span;
+use crate::common::symbol::Symbol;
 use crate::syntax::ast::visitor::*;
 use crate::syntax::ast::*;
-use crate::syntax::context::{Context, Symbol};
+use crate::syntax::context::Context;
 
 #[derive(Debug)]
 pub struct ASTValidator {

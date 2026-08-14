@@ -3,9 +3,10 @@ use ahash::{AHashMap, AHashSet};
 use crate::{
     analysis::{scoped_hashmap::ScopedHashMap, symbol_table::SymbolTable},
     common::span::Span,
+    common::symbol::Symbol,
     syntax::{
         ast::*,
-        context::{Context, ExprId, StmtId, Symbol, TypeId},
+        context::{Context, ExprId, StmtId, TypeId},
     },
 };
 

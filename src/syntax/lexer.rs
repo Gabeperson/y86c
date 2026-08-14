@@ -2,10 +2,8 @@ use std::{iter::Peekable, num::IntErrorKind, str::CharIndices};
 
 use smol_str::SmolStr;
 
-use crate::{
-    common::span::Span,
-    syntax::context::{Context, Symbol},
-};
+use crate::common::symbol::Symbol;
+use crate::{common::span::Span, syntax::context::Context};
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum KeywordKind {

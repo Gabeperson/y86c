@@ -1,6 +1,7 @@
+use crate::common::symbol::Symbol;
 use crate::{
     common::span::Span,
-    syntax::context::{Context, ExprId, StmtId, Symbol, TypeId},
+    syntax::context::{Context, ExprId, StmtId, TypeId},
 };
 use tinyvec::TinyVec;
 
