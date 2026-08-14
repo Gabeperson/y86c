@@ -30,8 +30,8 @@ pub enum ValueKind {
 
 #[derive(Clone, Debug)]
 pub struct BranchTarget {
-    target: BlockId,
-    args: TinyVec<[ValueId; 5]>,
+    pub target: BlockId,
+    pub args: TinyVec<[ValueId; 5]>,
 }
 
 #[derive(Debug, Clone)]
@@ -76,6 +76,9 @@ pub enum InstExtraData {
         struct_sym: Symbol,
         field: Symbol,
     },
+    ElementSize {
+        size: u32,
+    },
     Branch {
         then_target: BranchTarget,
         else_target: BranchTarget,
@@ -108,9 +111,21 @@ pub enum FunctionParamKind {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
+pub enum FunctionParamType {
+    #[default]
+    Int,
+    Ptr,
+    FnPtr,
+    Aggregate {
+        size: u32,
+        align: u32,
+    },
+}
+
+#[derive(Debug, Clone, Copy, Default)]
 pub struct FunctionParam {
     pub kind: FunctionParamKind,
-    pub typ: TypeId,
+    pub typ: FunctionParamType,
 }
 
 #[derive(Debug, Clone)]
