@@ -1,6 +1,7 @@
 use tinyvec::TinyVec;
 
 use crate::common::span::Span;
+use crate::common::symbol::Symbol;
 use crate::syntax::ast::*;
 use crate::syntax::context::Context;
 use crate::syntax::lexer::{KeywordKind, Token, TokenKind};
@@ -38,7 +39,36 @@ pub enum ParsingError {
     NegativeArrayLen {
         len_tok: Token,
     },
+    ExpectedAttrParam {
+        found: Token,
+    },
     UnexpectedEndOfInput,
+    UnknownAttribute {
+        for_decl: DeclKind,
+        span: Span,
+    },
+    InvalidAttributeParam {
+        for_decl: DeclKind,
+        for_attr: Symbol,
+        span: Span,
+    },
+    MissingAttributeParam {
+        for_decl: DeclKind,
+        for_attr: Symbol,
+        span: Span,
+    },
+    ExternVarHasInitializer {
+        span: Span,
+        attr: Span,
+        name: Ident,
+    },
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum DeclKind {
+    Function,
+    Struct,
+    Variable,
 }
 
 #[derive(Debug)]
@@ -48,6 +78,18 @@ pub struct Parser<'t> {
     cursor: usize,
     id: u64,
     testing: bool,
+}
+
+#[derive(Debug, Clone)]
+pub enum AttrParam {
+    Ident(Ident),
+    Num { int: u64, minus: bool, span: Span },
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct Attr {
+    name: Ident,
+    param: Option<AttrParam>,
 }
 
 #[derive(Debug)]
@@ -193,11 +235,53 @@ impl<'t> Parser<'t> {
         let init = ExprKind::ArrayInit(ArrayInit { elements, span, id });
         Ok(Expr::new(init, span, id))
     }
+    fn parse_attrs(&mut self, ctx: &mut Context) -> Result<TinyVec<[Attr; 5]>> {
+        self.expect_or_ice(TokenKind::At);
+        self.expect(
+            TokenKind::LSquare,
+            "Expected '[' after attribute start token '@'",
+        )?;
+        let mut v: TinyVec<[Attr; 5]> = TinyVec::new();
+        while !self.match_token(TokenKind::RSquare)? {
+            let attr_type = self.parse_ident(ctx)?;
+            let attr_param = if self.match_token(TokenKind::LParen)? {
+                self.advance();
+                let param = self.parse_attr_param(ctx)?;
+                self.expect(TokenKind::RParen, "Expected ')' after attribute parameter")?;
+                Some(param)
+            } else {
+                None
+            };
+            v.push(Attr {
+                name: attr_type,
+                param: attr_param,
+            });
+            if self.match_token(TokenKind::Comma)? {
+                self.advance()
+            } else {
+                break;
+            }
+        }
+        self.expect(TokenKind::RSquare, "Expected ']' at end of attribute")?;
+        Ok(v)
+    }
     fn parse_global_decl(&mut self, ctx: &mut Context) -> Result<GlobalDeclaration> {
-        let token = self.current()?;
+        let mut token = self.current()?;
+        let attrs = if let TokenKind::At = &token.kind {
+            let res = self.parse_attrs(ctx)?;
+            token = self.current()?;
+            Some(res)
+        } else {
+            None
+        };
+        let attrs = if let Some(attrs) = &attrs {
+            attrs.as_slice()
+        } else {
+            &[]
+        };
         match token.kind {
             TokenKind::Keyword(KeywordKind::Struct) => {
-                let decl = self.parse_struct_decl(ctx)?;
+                let decl = self.parse_struct_decl(ctx, attrs)?;
                 let span = decl.span;
                 let id = decl.id;
                 Ok(GlobalDeclaration {
@@ -207,7 +291,7 @@ impl<'t> Parser<'t> {
                 })
             }
             TokenKind::Keyword(KeywordKind::Fn) => {
-                let decl = self.parse_function_decl(ctx)?;
+                let decl = self.parse_function_decl(ctx, attrs)?;
                 let span = decl.span;
                 let id = decl.id;
                 Ok(GlobalDeclaration {
@@ -217,7 +301,7 @@ impl<'t> Parser<'t> {
                 })
             }
             TokenKind::Keyword(KeywordKind::Let) => {
-                let decl = self.parse_variable_decl(ctx)?;
+                let decl = self.parse_variable_decl(ctx, attrs)?;
                 if !self.match_token(TokenKind::Semicolon)? {
                     self.errors.push(ParsingError::ExpectedOtherToken {
                         expected: TokenKind::Semicolon,
@@ -267,7 +351,7 @@ impl<'t> Parser<'t> {
             TokenKind::Keyword(KeywordKind::For) => return self.parse_for_loop(ctx),
             TokenKind::Keyword(KeywordKind::If) => return self.parse_if_stmt(ctx),
             TokenKind::Keyword(KeywordKind::Let) => {
-                let decl = self.parse_variable_decl(ctx)?;
+                let decl = self.parse_variable_decl(ctx, &[])?;
                 let span = decl.span;
                 let id = decl.id;
                 let kind = StmtKind::VariableDeclaration(decl);
@@ -482,7 +566,37 @@ impl<'t> Parser<'t> {
         let typ = self.parse_type_node(ctx)?;
         Ok((ident, typ))
     }
-    fn parse_variable_decl(&mut self, ctx: &mut Context) -> Result<VariableDeclaration> {
+    fn parse_variable_decl(
+        &mut self,
+        ctx: &mut Context,
+        attrs: &[Attr],
+    ) -> Result<VariableDeclaration> {
+        let mut is_extern = false;
+        let mut attr_span = Span::empty();
+        for attr in attrs {
+            let name = ctx.get_symbol(attr.name.sym);
+            match name {
+                "extern" => {
+                    let None = &attr.param else {
+                        self.errors.push(ParsingError::InvalidAttributeParam {
+                            for_decl: DeclKind::Variable,
+                            for_attr: attr.name.sym,
+                            span: attr.name.span,
+                        });
+                        continue;
+                    };
+                    is_extern = true;
+                    attr_span = attr.name.span;
+                }
+                _ => {
+                    self.errors.push(ParsingError::UnknownAttribute {
+                        for_decl: DeclKind::Function,
+                        span: attr.name.span,
+                    });
+                }
+            }
+        }
+
         let let_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Let));
         let name = self.parse_ident(ctx)?;
         self.expect(
@@ -499,8 +613,16 @@ impl<'t> Parser<'t> {
         } else {
             None
         };
+        if is_extern && let Some(init_value) = &init_value {
+            self.errors.push(ParsingError::ExternVarHasInitializer {
+                span: init_value.span,
+                attr: attr_span,
+                name,
+            });
+        }
         let id = self.next_id();
         Ok(VariableDeclaration {
+            is_extern,
             var_type: typ,
             name,
             init_value: init_value.map(|v| ctx.intern_expr(v)),
@@ -508,7 +630,86 @@ impl<'t> Parser<'t> {
             id,
         })
     }
-    fn parse_function_decl(&mut self, ctx: &mut Context) -> Result<FunctionDeclaration> {
+    fn parse_function_decl(
+        &mut self,
+        ctx: &mut Context,
+        attrs: &[Attr],
+    ) -> Result<FunctionDeclaration> {
+        let mut inline = Inline::Auto;
+        let mut calling_convention = CallingConvention::Internal;
+
+        for attr in attrs {
+            let name = ctx.get_symbol(attr.name.sym);
+            match name {
+                "inline" => {
+                    let Some(param) = &attr.param else {
+                        self.errors.push(ParsingError::MissingAttributeParam {
+                            for_decl: DeclKind::Function,
+                            for_attr: attr.name.sym,
+                            span: attr.name.span,
+                        });
+                        continue;
+                    };
+                    if let AttrParam::Ident(id) = param {
+                        let param = ctx.get_symbol(id.sym);
+                        match param {
+                            "always" => {
+                                inline = Inline::Always;
+                                continue;
+                            }
+                            "never" => {
+                                inline = Inline::Never;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.errors.push(ParsingError::InvalidAttributeParam {
+                        for_decl: DeclKind::Function,
+                        for_attr: attr.name.sym,
+                        span: attr.name.span,
+                    });
+                    continue;
+                }
+                "cc" => {
+                    let Some(param) = &attr.param else {
+                        self.errors.push(ParsingError::MissingAttributeParam {
+                            for_decl: DeclKind::Function,
+                            for_attr: attr.name.sym,
+                            span: attr.name.span,
+                        });
+                        continue;
+                    };
+                    if let AttrParam::Ident(id) = param {
+                        let param = ctx.get_symbol(id.sym);
+                        match param {
+                            "internal" => {
+                                calling_convention = CallingConvention::Internal;
+                                continue;
+                            }
+                            "abi" => {
+                                calling_convention = CallingConvention::Abi;
+                                continue;
+                            }
+                            _ => {}
+                        }
+                    }
+                    self.errors.push(ParsingError::InvalidAttributeParam {
+                        for_decl: DeclKind::Function,
+                        for_attr: attr.name.sym,
+                        span: attr.name.span,
+                    });
+                    continue;
+                }
+                _ => {
+                    self.errors.push(ParsingError::UnknownAttribute {
+                        for_decl: DeclKind::Function,
+                        span: attr.name.span,
+                    });
+                }
+            }
+        }
+
         let fn_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Fn));
         let name = self.parse_ident(ctx)?;
         self.expect(
@@ -543,6 +744,8 @@ impl<'t> Parser<'t> {
         let span = Span::new(fn_kw.span.start, body.span.end);
         let id = self.next_id();
         Ok(FunctionDeclaration {
+            inline,
+            calling_convention,
             return_type: ret_type,
             name,
             params,
@@ -551,7 +754,17 @@ impl<'t> Parser<'t> {
             id,
         })
     }
-    fn parse_struct_decl(&mut self, ctx: &mut Context) -> Result<StructDeclaration> {
+    fn parse_struct_decl(
+        &mut self,
+        ctx: &mut Context,
+        attrs: &[Attr],
+    ) -> Result<StructDeclaration> {
+        for attr in attrs {
+            self.errors.push(ParsingError::UnknownAttribute {
+                for_decl: DeclKind::Struct,
+                span: attr.name.span,
+            });
+        }
         let struct_kw = self.expect_or_ice(TokenKind::Keyword(KeywordKind::Struct));
         let name = self.parse_ident(ctx)?;
         self.expect(TokenKind::LCurly, "Expected '{' after struct name")?;
@@ -646,7 +859,7 @@ impl<'t> Parser<'t> {
         let token = self.current()?;
         let init = match token.kind {
             TokenKind::Keyword(KeywordKind::Let) => {
-                let vardecl = self.parse_variable_decl(ctx)?;
+                let vardecl = self.parse_variable_decl(ctx, &[])?;
                 let span = vardecl.span;
                 let id = vardecl.id;
                 let kind = StmtKind::VariableDeclaration(vardecl);
@@ -730,6 +943,21 @@ impl<'t> Parser<'t> {
             span: token.span,
             id,
         })
+    }
+    fn parse_attr_param(&mut self, ctx: &mut Context) -> Result<AttrParam> {
+        let current = self.current()?;
+        match current.kind {
+            TokenKind::Ident(_) => Ok(AttrParam::Ident(self.parse_ident(ctx)?)),
+            TokenKind::IntLiteral { value, minus } => {
+                self.advance();
+                Ok(AttrParam::Num {
+                    int: value,
+                    minus,
+                    span: current.span,
+                })
+            }
+            _ => Err(ParsingError::ExpectedAttrParam { found: current }),
+        }
     }
 }
 
@@ -1629,6 +1857,7 @@ mod tests {
             let mut ctx = ctx();
             Stmt {
                 kind: StmtKind::VariableDeclaration(VariableDeclaration {
+                    is_extern: false,
                     var_type: typenode(typ, &mut ctx),
                     name,
                     init_value: init.map(|e| ctx.intern_expr(e)),
@@ -1648,6 +1877,8 @@ mod tests {
             use utils::*;
             let mut ctx = ctx();
             FunctionDeclaration {
+                inline: Inline::Auto,
+                calling_convention: CallingConvention::Internal,
                 return_type: return_type.map(|t| typenode(t, &mut ctx)),
                 name,
                 params: params
@@ -2755,7 +2986,7 @@ mod tests {
         let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
         let parsed = Stmt {
-            kind: StmtKind::VariableDeclaration(parser.parse_variable_decl(&mut ctx).unwrap()),
+            kind: StmtKind::VariableDeclaration(parser.parse_variable_decl(&mut ctx, &[]).unwrap()),
             span: Span::empty(),
             id: NodeId(0),
         };
@@ -2850,7 +3081,7 @@ mod tests {
             let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_variable_decl(&mut ctx).is_err()
+                parser.parse_variable_decl(&mut ctx, &[]).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2863,7 +3094,7 @@ mod tests {
         let mut ctx = ctx();
         let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_function_decl(&mut ctx).unwrap();
+        let parsed = parser.parse_function_decl(&mut ctx, &[]).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
         assert!(parsed.ctx_eq(&expected, &ctx));
@@ -2932,7 +3163,7 @@ mod tests {
             let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_function_decl(&mut ctx).is_err()
+                parser.parse_function_decl(&mut ctx, &[]).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -2945,7 +3176,7 @@ mod tests {
         let mut ctx = ctx();
         let lexed = lex(s, &mut ctx);
         let mut parser = Parser::new(&lexed);
-        let parsed = parser.parse_struct_decl(&mut ctx).unwrap();
+        let parsed = parser.parse_struct_decl(&mut ctx, &[]).unwrap();
         assert!(parser.is_at_end());
         assert!(parser.errors.is_empty());
         assert!(parsed.ctx_eq(&expected, &ctx));
@@ -3003,7 +3234,7 @@ mod tests {
             let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
             assert!(
-                parser.parse_struct_decl(&mut ctx).is_err()
+                parser.parse_struct_decl(&mut ctx, &[]).is_err()
                     || !parser.is_at_end()
                     || !parser.errors.is_empty()
             );
@@ -3124,6 +3355,7 @@ mod tests {
             "let a: int = 5;",
             GlobalDeclaration {
                 kind: GlobalDeclarationKind::Variable(VariableDeclaration {
+                    is_extern: false,
                     var_type: typenode,
                     name: ident,
                     init_value,
@@ -3134,6 +3366,45 @@ mod tests {
                 id: NodeId(0),
             },
         );
+        #[track_caller]
+        fn compile_global_decl(s: &str) -> GlobalDeclaration {
+            use utils::*;
+            let mut ctx = ctx();
+            let lexed = lex(s, &mut ctx);
+            let mut parser = Parser::new(&lexed);
+            parser.parse_global_decl(&mut ctx).unwrap()
+        }
+        #[track_caller]
+        fn compile_func_decl(s: &str) -> FunctionDeclaration {
+            compile_global_decl(s).kind.to_function_decl().unwrap()
+        }
+        #[track_caller]
+        fn compile_vardecl(s: &str) -> VariableDeclaration {
+            compile_global_decl(s).kind.to_variable_decl().unwrap()
+        }
+        #[track_caller]
+        fn compile_structdecl(s: &str) -> StructDeclaration {
+            compile_global_decl(s).kind.to_struct_decl().unwrap()
+        }
+        let func1 = compile_func_decl("@[] fn foo() {}");
+        assert!(func1.inline == Inline::Auto);
+        assert!(func1.calling_convention == CallingConvention::Internal);
+        let func2 = compile_func_decl("@[inline(always)] fn foo() {}");
+        assert!(func2.inline == Inline::Always);
+        assert!(func2.calling_convention == CallingConvention::Internal);
+        let func3 = compile_func_decl("@[inline(always), cc(abi)] fn foo() {}");
+        assert!(func3.inline == Inline::Always);
+        assert!(func3.calling_convention == CallingConvention::Abi);
+        let func4 = compile_func_decl("@[inline(never), cc(internal)] fn foo() {}");
+        assert!(func4.inline == Inline::Never);
+        assert!(func4.calling_convention == CallingConvention::Internal);
+
+        let vd1 = compile_vardecl("@[] let x: int = 5;");
+        assert!(!vd1.is_extern);
+        let vd2 = compile_vardecl("@[extern] let x: int;");
+        assert!(vd2.is_extern);
+
+        compile_structdecl("@[] struct Test {}");
     }
 
     #[test]

@@ -640,6 +640,7 @@ impl CtxEq for ReturnStmt {
 pub struct VariableDeclaration {
     pub var_type: TypeNode,
     pub name: Ident,
+    pub is_extern: bool,
     pub init_value: Option<ExprId>,
     pub span: Span,
     pub id: NodeId,
@@ -667,8 +668,23 @@ impl CtxEq for StructDeclaration {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum Inline {
+    Auto,
+    Always,
+    Never,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum CallingConvention {
+    Internal,
+    Abi,
+}
+
 #[derive(Debug, Clone)]
 pub struct FunctionDeclaration {
+    pub inline: Inline,
+    pub calling_convention: CallingConvention,
     pub return_type: Option<TypeNode>,
     pub name: Ident,
     pub params: TinyVec<[(Ident, TypeNode); 5]>,
@@ -704,6 +720,30 @@ pub enum GlobalDeclarationKind {
     Variable(VariableDeclaration),
     Struct(StructDeclaration),
     Function(FunctionDeclaration),
+}
+
+impl GlobalDeclarationKind {
+    pub fn to_variable_decl(self) -> Option<VariableDeclaration> {
+        if let GlobalDeclarationKind::Variable(d) = self {
+            Some(d)
+        } else {
+            None
+        }
+    }
+    pub fn to_struct_decl(self) -> Option<StructDeclaration> {
+        if let GlobalDeclarationKind::Struct(d) = self {
+            Some(d)
+        } else {
+            None
+        }
+    }
+    pub fn to_function_decl(self) -> Option<FunctionDeclaration> {
+        if let GlobalDeclarationKind::Function(d) = self {
+            Some(d)
+        } else {
+            None
+        }
+    }
 }
 
 impl CtxEq for GlobalDeclarationKind {

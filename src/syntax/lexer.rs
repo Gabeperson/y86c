@@ -72,6 +72,7 @@ pub enum TokenKind {
     Arrow,
     Error,
     Tilde,
+    At,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -133,7 +134,7 @@ impl CharType {
             '0'..='9' => CharType::Num,
             ws if ws.is_whitespace() => CharType::Whitespace,
             '+' | '-' | '*' | '/' | ';' | ',' | '=' | '>' | '<' | '!' | '&' | '|' | '^' | '?'
-            | ':' | '.' | '%' | '~' => CharType::Punctutation,
+            | ':' | '.' | '%' | '~' | '@' => CharType::Punctutation,
             '(' | ')' | '{' | '}' | '[' | ']' => CharType::Bracket,
             _ => CharType::Unknown,
         }
@@ -361,6 +362,7 @@ impl<'a> Lexer<'a> {
             ';' => TokenKind::Semicolon,
             ',' => TokenKind::Comma,
             '~' => TokenKind::Tilde,
+            '@' => TokenKind::At,
             _ => unreachable!(),
         };
         let span = Span::new(start, self.curr_index());
@@ -612,4 +614,6 @@ fn test_lexer() {
     test("^=", TokenKind::CaretEqual);
     test("%=", TokenKind::PercentEqual);
     test("->", TokenKind::Arrow);
+    test("~", TokenKind::Tilde);
+    test("@", TokenKind::At);
 }
