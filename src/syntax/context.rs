@@ -1,5 +1,3 @@
-use std::hash::Hash;
-
 use smol_str::SmolStr;
 
 use crate::common::symbol::*;

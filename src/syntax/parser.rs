@@ -1071,7 +1071,7 @@ impl<'t> Parser<'t> {
                 self.advance();
                 self.expect(TokenKind::LParen, "Expected '(' after copy_prov")?;
                 let prov_ptr = self.parse_expr(ctx)?;
-                self.expect(TokenKind::Comma, "Expected ',' after ptr in copy_prov");
+                self.expect(TokenKind::Comma, "Expected ',' after ptr in copy_prov")?;
                 let addr = self.parse_expr(ctx)?;
                 let end_tok = self.expect(TokenKind::RParen, "Expected ')' at end of copy_prov")?;
                 let span = Span::new(token.span.start, end_tok.span.end);
