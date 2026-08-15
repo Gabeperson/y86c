@@ -363,6 +363,21 @@ fn v_divassign1() { let a: int = 1; let b: int = a /= 1; }
 fn i_divassign2() { let a: *void = 1; a /= 1; }
 fn i_divassign4() { 1 /= 1; }
 
+fn v_shl1() { let a: int = 1<<1; }
+fn i_shl2() { nullptr<<1; }
+fn i_shl4() { Struct {x: 10}<<1; }
+fn v_shlassign1() { let a: int = 1; let b: int = a <<= 1; }
+fn i_shlassign2() { let a: *void = 1; a <<= 1; }
+fn i_shlassign4() { 1 <<= 1; }
+
+fn v_shr1() { let a: int = 1>>1; }
+fn i_shr2() { nullptr>>1; }
+fn i_shr4() { Struct {x: 10}>>1; }
+fn v_shrassign1() { let a: int = 1; let b: int = a >>= 1; }
+fn i_shrassign2() { let a: *void = 1; a >>= 1; }
+fn i_shrassign4() { 1 >>= 1; }
+
+
 fn v_mod1() { let a: int = 1%1; }
 fn i_mod2() { nullptr%1; }
 fn i_mod3() { 1%nullptr; }
