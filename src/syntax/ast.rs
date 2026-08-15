@@ -173,6 +173,10 @@ pub enum ExprKind {
     ArrayInit(ArrayInit),
     MemberAccess(MemberAccess),
     PointerMemberAccess(PointerMemberAccess),
+    CopyProvenance(CopyProvenance),
+    ExposeProvenance(ExposeProvenance),
+    UnexposeProvenance(UnexposeProvenance),
+    NewProvenance(NewProvenance),
     #[default]
     Error,
 }
@@ -199,6 +203,58 @@ impl CtxEq for ExprKind {
             }
             _ => core::mem::discriminant(self) == core::mem::discriminant(other),
         }
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct CopyProvenance {
+    pub prov_ptr: ExprId,
+    pub addr: ExprId,
+    pub span: Span,
+    pub id: NodeId,
+}
+
+impl CtxEq for CopyProvenance {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.prov_ptr.ctx_eq(&other.prov_ptr, ctx) && self.addr.ctx_eq(&other.addr, ctx)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExposeProvenance {
+    pub ptr: ExprId,
+    pub span: Span,
+    pub id: NodeId,
+}
+
+impl CtxEq for ExposeProvenance {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.ptr.ctx_eq(&other.ptr, ctx)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct UnexposeProvenance {
+    pub int: ExprId,
+    pub span: Span,
+    pub id: NodeId,
+}
+impl CtxEq for UnexposeProvenance {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.int.ctx_eq(&other.int, ctx)
+    }
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct NewProvenance {
+    pub ptr: ExprId,
+    pub span: Span,
+    pub id: NodeId,
+}
+
+impl CtxEq for NewProvenance {
+    fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
+        self.ptr.ctx_eq(&other.ptr, ctx)
     }
 }
 
@@ -849,6 +905,19 @@ pub mod visitor {
         fn visit_pointer_member_access(&mut self, expr: &PointerMemberAccess, ctx: &Context) {
             self.visit_expr(ctx.get_expr(expr.struct_ptr_expr), ctx);
         }
+        fn visit_copy_prov(&mut self, expr: &CopyProvenance, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.prov_ptr), ctx);
+            self.visit_expr(ctx.get_expr(expr.addr), ctx);
+        }
+        fn visit_expose_prov(&mut self, expr: &ExposeProvenance, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.ptr), ctx);
+        }
+        fn visit_unexpose_prov(&mut self, expr: &UnexposeProvenance, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.int), ctx);
+        }
+        fn visit_new_prov(&mut self, expr: &NewProvenance, ctx: &Context) {
+            self.visit_expr(ctx.get_expr(expr.ptr), ctx);
+        }
         fn visit_assert(&mut self, stmt: &Assert, ctx: &Context) {
             self.visit_expr(ctx.get_expr(stmt.condition), ctx);
         }
@@ -950,6 +1019,14 @@ pub mod visitor {
                 visitor.visit_pointer_member_access(pointer_member_access, ctx)
             }
             ExprKind::Error => visitor.visit_error_expr(ctx),
+            ExprKind::CopyProvenance(copy_provenance) => {
+                visitor.visit_copy_prov(copy_provenance, ctx)
+            }
+            ExprKind::ExposeProvenance(expose_provenance) => {
+                visitor.visit_expose_prov(expose_provenance, ctx)
+            }
+            ExprKind::UnexposeProvenance(unexpose) => visitor.visit_unexpose_prov(unexpose, ctx),
+            ExprKind::NewProvenance(new_provenance) => visitor.visit_new_prov(new_provenance, ctx),
         }
     }
     pub fn walk_stmt<V: AstVisitor + ?Sized>(visitor: &mut V, stmt: &Stmt, ctx: &Context) {

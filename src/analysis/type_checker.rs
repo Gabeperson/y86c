@@ -170,11 +170,31 @@ pub enum TypeCheckError {
         op: PostfixOpKind,
     },
     InvalidAddressOf {
-        expr_id: TypeId,
+        expr_type_id: TypeId,
         span: Span,
     },
     InvalidDereference {
-        expr_id: TypeId,
+        expr_type_id: TypeId,
+        span: Span,
+    },
+    InvalidCopyProvPtr {
+        typ: TypeId,
+        span: Span,
+    },
+    InvalidCopyProvAddr {
+        typ: TypeId,
+        span: Span,
+    },
+    InvalidNewProvPtr {
+        typ: TypeId,
+        span: Span,
+    },
+    InvalidExposeProvPtr {
+        typ: TypeId,
+        span: Span,
+    },
+    InvalidUnexposeProvAddr {
+        typ: TypeId,
         span: Span,
     },
 }
@@ -794,7 +814,88 @@ impl<'a> TypeChecker<'a> {
                 self.check_pointer_member_access(*pointer_member_access)
             }
             ExprKind::Error => None,
+            ExprKind::CopyProvenance(copy_prov) => self.check_copy_prov(*copy_prov),
+            ExprKind::ExposeProvenance(expose_prov) => self.check_expose_prov(*expose_prov),
+            ExprKind::UnexposeProvenance(unexpose_prov) => self.check_unexpose_prov(*unexpose_prov),
+            ExprKind::NewProvenance(new_prov) => self.check_new_prov(*new_prov),
         }
+    }
+
+    fn check_copy_prov(&mut self, copy_prov: CopyProvenance) -> Option<ExprTypeInfo> {
+        let ptr = self.check_expr(copy_prov.prov_ptr);
+        let addr = self.check_expr(copy_prov.addr);
+        let (Some(ptr), Some(addr)) = (ptr, addr) else {
+            return None;
+        };
+        let ptr_type = self.ctx.get_type(ptr.id);
+        let addr_type = self.ctx.get_type(addr.id);
+        if !ptr_type.is_ptr() {
+            let expr = self.ctx.get_expr(copy_prov.prov_ptr);
+            self.errors.push(TypeCheckError::InvalidCopyProvPtr {
+                typ: ptr.id,
+                span: expr.span,
+            });
+        }
+        if !addr_type.is_int() {
+            let expr = self.ctx.get_expr(copy_prov.addr);
+            self.errors.push(TypeCheckError::InvalidCopyProvAddr {
+                typ: addr.id,
+                span: expr.span,
+            });
+        }
+        let void = self.ctx.intern_type(Type::Void);
+        let typ = self.ctx.intern_type(Type::Ptr {
+            pointee: void,
+            noalias: false,
+        });
+        Some(ExprTypeInfo::new(typ, false))
+    }
+    fn check_expose_prov(&mut self, expose_prov: ExposeProvenance) -> Option<ExprTypeInfo> {
+        let ptr = self.check_expr(expose_prov.ptr)?;
+        let ptr_type = self.ctx.get_type(ptr.id);
+        if !ptr_type.is_ptr() {
+            let expr = self.ctx.get_expr(expose_prov.ptr);
+            self.errors.push(TypeCheckError::InvalidExposeProvPtr {
+                typ: ptr.id,
+                span: expr.span,
+            });
+        }
+        let typ = self.ctx.intern_type(Type::Int);
+        Some(ExprTypeInfo::new(typ, false))
+    }
+    fn check_unexpose_prov(&mut self, unexpose_prov: UnexposeProvenance) -> Option<ExprTypeInfo> {
+        let int = self.check_expr(unexpose_prov.int)?;
+        let int_type = self.ctx.get_type(int.id);
+        if !int_type.is_int() {
+            let expr = self.ctx.get_expr(unexpose_prov.int);
+            self.errors.push(TypeCheckError::InvalidUnexposeProvAddr {
+                typ: int.id,
+                span: expr.span,
+            });
+        }
+        let void = self.ctx.intern_type(Type::Void);
+        let typ = self.ctx.intern_type(Type::Ptr {
+            pointee: void,
+            noalias: false,
+        });
+        Some(ExprTypeInfo::new(typ, false))
+    }
+    fn check_new_prov(&mut self, new_prov: NewProvenance) -> Option<ExprTypeInfo> {
+        let ptr = self.check_expr(new_prov.ptr)?;
+        let ptr_type = self.ctx.get_type(ptr.id);
+        if !ptr_type.is_ptr() {
+            let expr = self.ctx.get_expr(new_prov.ptr);
+            self.errors.push(TypeCheckError::InvalidNewProvPtr {
+                typ: ptr.id,
+                span: expr.span,
+            });
+        }
+        let void = self.ctx.intern_type(Type::Void);
+        let typ = self.ctx.intern_type(Type::Ptr {
+            pointee: void,
+            noalias: true,
+        });
+        Some(ExprTypeInfo::new(typ, false))
     }
 
     fn check_type(&mut self, typ: TypeId, span: Span) -> Option<()> {
@@ -1040,7 +1141,7 @@ impl<'a> TypeChecker<'a> {
             PrefixOpKind::AddressOf => {
                 if !expr_info.assignable {
                     self.errors.push(TypeCheckError::InvalidAddressOf {
-                        expr_id,
+                        expr_type_id: expr_id,
                         span: op.span,
                     });
                     return None;
@@ -1060,7 +1161,7 @@ impl<'a> TypeChecker<'a> {
                     return Some(expr_type_info);
                 } else {
                     self.errors.push(TypeCheckError::InvalidDereference {
-                        expr_id,
+                        expr_type_id: expr_id,
                         span: op.span,
                     });
                     return None;

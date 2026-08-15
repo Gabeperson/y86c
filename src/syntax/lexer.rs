@@ -24,6 +24,10 @@ pub enum KeywordKind {
     Let,
     NoAlias,
     Assert,
+    NewProvenance,
+    ExposeProvenance,
+    UnexposeProv,
+    CopyProvenance,
 }
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
@@ -188,6 +192,10 @@ impl<'a> Lexer<'a> {
             "let" => TokenKind::Keyword(KeywordKind::Let),
             "noalias" => TokenKind::Keyword(KeywordKind::NoAlias),
             "assert" => TokenKind::Keyword(KeywordKind::Assert),
+            "new_prov" => TokenKind::Keyword(KeywordKind::NewProvenance),
+            "expose_prov" => TokenKind::Keyword(KeywordKind::ExposeProvenance),
+            "unexpose_prov" => TokenKind::Keyword(KeywordKind::UnexposeProv),
+            "copy_prov" => TokenKind::Keyword(KeywordKind::CopyProvenance),
             _ => TokenKind::Ident(ctx.intern_symbol(s)),
         };
         self.tokens.push(Token { kind, span });
@@ -468,6 +476,17 @@ fn test_lexer() {
     test("let", TokenKind::Keyword(KeywordKind::Let));
     test("noalias", TokenKind::Keyword(KeywordKind::NoAlias));
     test("assert", TokenKind::Keyword(KeywordKind::Assert));
+
+    test("new_prov", TokenKind::Keyword(KeywordKind::NewProvenance));
+    test(
+        "expose_prov",
+        TokenKind::Keyword(KeywordKind::ExposeProvenance),
+    );
+    test(
+        "unexpose_prov",
+        TokenKind::Keyword(KeywordKind::UnexposeProv),
+    );
+    test("copy_prov", TokenKind::Keyword(KeywordKind::CopyProvenance));
 
     test_ident("hello");
     test_ident("hi");

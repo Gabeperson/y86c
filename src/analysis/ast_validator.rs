@@ -109,17 +109,6 @@ impl AstVisitor for ASTValidator {
         );
     }
 
-    fn visit_cast(&mut self, expr: &Cast, ctx: &Context) {
-        self.visit_expr(ctx.get_expr(expr.expr), ctx);
-        self.visit_type_impl(
-            ctx.get_type(expr.to_type.inner),
-            false,
-            true,
-            expr.to_type.span,
-            ctx,
-        );
-    }
-
     fn visit_break(&mut self, stmt: &Break, _ctx: &Context) {
         if self.loop_depth == 0 {
             self.errors
@@ -469,10 +458,10 @@ mod tests {
         assert_fail("let x: noalias *int;", true);
         assert_fail("fn foo() { let x: noalias *int; }", true);
         // Should fail in global var calc but should fail here too
-        assert_success("let x: int = X as noalias *int;", true);
+        assert_fail("let x: int = X as noalias *int;", true);
         assert_success("struct X { x: *int }", true);
         assert_fail("struct X { x: noalias *int }", true);
-        assert_success("fn foo() { return 0 as noalias *int; }", true);
+        assert_success("fn foo() { return new_prov(nullptr); }", true);
 
         assert_success("fn foo() { return SomeStruct {}; }", true);
         assert_success("fn foo() { return SomeStruct {a: x}; }", true);

@@ -1032,6 +1032,60 @@ impl<'t> Parser<'t> {
                 let kind = ExprKind::SizeOfType(SizeOfType { typ, span, id });
                 Ok(Some(Expr::new(kind, span, id)))
             }
+            TokenKind::Keyword(KeywordKind::NewProvenance) => {
+                self.advance();
+                self.expect(TokenKind::LParen, "Expected '(' after new_prov")?;
+                let ptr = self.parse_expr(ctx)?;
+                let end_tok = self.expect(TokenKind::RParen, "Expected ')' at end of new_prov")?;
+                let span = Span::new(token.span.start, end_tok.span.end);
+                let id = self.next_id();
+                let ptr = ctx.intern_expr(ptr);
+                let kind = ExprKind::NewProvenance(NewProvenance { ptr, span, id });
+                Ok(Some(Expr::new(kind, span, id)))
+            }
+            TokenKind::Keyword(KeywordKind::UnexposeProv) => {
+                self.advance();
+                self.expect(TokenKind::LParen, "Expected '(' after unexpose_prov")?;
+                let ptr = self.parse_expr(ctx)?;
+                let end_tok =
+                    self.expect(TokenKind::RParen, "Expected ')' at end of unexpose_prov")?;
+                let span = Span::new(token.span.start, end_tok.span.end);
+                let id = self.next_id();
+                let int = ctx.intern_expr(ptr);
+                let kind = ExprKind::UnexposeProvenance(UnexposeProvenance { int, span, id });
+                Ok(Some(Expr::new(kind, span, id)))
+            }
+            TokenKind::Keyword(KeywordKind::ExposeProvenance) => {
+                self.advance();
+                self.expect(TokenKind::LParen, "Expected '(' after expose_prov")?;
+                let ptr = self.parse_expr(ctx)?;
+                let end_tok =
+                    self.expect(TokenKind::RParen, "Expected ')' at end of expose_prov")?;
+                let span = Span::new(token.span.start, end_tok.span.end);
+                let id = self.next_id();
+                let ptr = ctx.intern_expr(ptr);
+                let kind = ExprKind::ExposeProvenance(ExposeProvenance { ptr, span, id });
+                Ok(Some(Expr::new(kind, span, id)))
+            }
+            TokenKind::Keyword(KeywordKind::CopyProvenance) => {
+                self.advance();
+                self.expect(TokenKind::LParen, "Expected '(' after copy_prov")?;
+                let prov_ptr = self.parse_expr(ctx)?;
+                self.expect(TokenKind::Comma, "Expected ',' after ptr in copy_prov");
+                let addr = self.parse_expr(ctx)?;
+                let end_tok = self.expect(TokenKind::RParen, "Expected ')' at end of copy_prov")?;
+                let span = Span::new(token.span.start, end_tok.span.end);
+                let id = self.next_id();
+                let prov_ptr = ctx.intern_expr(prov_ptr);
+                let addr = ctx.intern_expr(addr);
+                let kind = ExprKind::CopyProvenance(CopyProvenance {
+                    prov_ptr,
+                    addr,
+                    span,
+                    id,
+                });
+                Ok(Some(Expr::new(kind, span, id)))
+            }
             TokenKind::Keyword(KeywordKind::Nullptr) => {
                 self.advance();
                 let id = self.next_id();
@@ -1594,6 +1648,55 @@ mod tests {
                 NodeId(0),
             )
         }
+        pub fn expose_prov(ptr: Expr) -> Expr {
+            let mut ctx = ctx();
+            Expr::new(
+                ExprKind::ExposeProvenance(ExposeProvenance {
+                    ptr: ctx.intern_expr(ptr),
+                    span: Span::empty(),
+                    id: NodeId(0),
+                }),
+                Span::empty(),
+                NodeId(0),
+            )
+        }
+        pub fn new_prov(ptr: Expr) -> Expr {
+            let mut ctx = ctx();
+            Expr::new(
+                ExprKind::NewProvenance(NewProvenance {
+                    ptr: ctx.intern_expr(ptr),
+                    span: Span::empty(),
+                    id: NodeId(0),
+                }),
+                Span::empty(),
+                NodeId(0),
+            )
+        }
+        pub fn unexpose_prov(int: Expr) -> Expr {
+            let mut ctx = ctx();
+            Expr::new(
+                ExprKind::UnexposeProvenance(UnexposeProvenance {
+                    int: ctx.intern_expr(int),
+                    span: Span::empty(),
+                    id: NodeId(0),
+                }),
+                Span::empty(),
+                NodeId(0),
+            )
+        }
+        pub fn copy_prov(prov_ptr: Expr, addr: Expr) -> Expr {
+            let mut ctx = ctx();
+            Expr::new(
+                ExprKind::CopyProvenance(CopyProvenance {
+                    prov_ptr: ctx.intern_expr(prov_ptr),
+                    addr: ctx.intern_expr(addr),
+                    span: Span::empty(),
+                    id: NodeId(0),
+                }),
+                Span::empty(),
+                NodeId(0),
+            )
+        }
         pub fn nullptr() -> Expr {
             Expr::new(
                 ExprKind::Nullptr(Nullptr {
@@ -2119,6 +2222,14 @@ mod tests {
         compare_exprs("*nullptr", dereference(nullptr()));
         compare_exprs("~a", bitnot(a()));
         compare_exprs("~!!++a", bitnot(not(not(prefix_increment(a())))));
+        compare_exprs("new_prov(nullptr)", new_prov(nullptr()));
+        compare_exprs("copy_prov(nullptr, 15)", copy_prov(nullptr(), num(15)));
+        compare_exprs("expose_prov(nullptr)", expose_prov(nullptr()));
+        compare_exprs("unexpose_prov(15)", unexpose_prov(num(15)));
+        compare_exprs(
+            "unexpose_prov(expose_prov(unexpose_prov(nullptr)))",
+            unexpose_prov(expose_prov(unexpose_prov(nullptr()))),
+        );
 
         compare_exprs("(((((((((((a)))))))))))", a());
         compare_exprs("a as int", cast(a(), get_type("int")));
@@ -2452,6 +2563,13 @@ mod tests {
             "sizeof()",
             "sizeof int",
             "sizeof(int*)",
+            "expose_prov()",
+            "expose_prov(a, b)",
+            "new_prov()",
+            "new_prov(a, b)",
+            "copy_prov()",
+            "copy_prov(a)",
+            "copy_prov(a, b, c)",
         ];
         for s in failing_tests {
             let mut ctx = ctx();

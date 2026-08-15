@@ -540,3 +540,33 @@ fn v_addr() { let a: [int; 2]; let b: *[int ;2] = &a; }
 fn i_addr() { &1; }
 fn i_addr() { &Struct {}; }
 fn v_addr(i: int) {&i;}
+
+fn v_new_prov() { let a: *void = new_prov(nullptr); }
+fn v_new_prov() { let a: *int = new_prov(nullptr); }
+fn v_new_prov() { let a: *int = new_prov(0 as *int); }
+fn v_new_prov() { let a: *Struct = new_prov(nullptr); }
+fn i_new_prov() { let a: int = new_prov(nullptr); }
+fn i_new_prov() { let a: int = new_prov(1); }
+fn i_new_prov() { let a: int = new_prov(0); }
+
+fn v_expose_prov() { let a: int = expose_prov(nullptr); }
+fn v_expose_prov() { let a: int = expose_prov(0 as *int); }
+fn v_expose_prov() { let a: int = expose_prov(0 as *Struct); }
+fn i_expose_prov() { let a: *int = expose_prov(nullptr); }
+fn i_expose_prov() { let a: int = expose_prov(1); }
+fn i_expose_prov() { let a: int = expose_prov(0); }
+
+fn v_unexpose_prov() { let a: *void = unexpose_prov(1); }
+fn v_unexpose_prov() { let a: *int = unexpose_prov(0); }
+fn i_unexpose_prov() { let a: *int = unexpose_prov(0 as *int); }
+fn v_unexpose_prov() { let a: *Struct = unexpose_prov(0x100000); }
+fn i_unexpose_prov() { let a: int = unexpose_prov(nullptr); }
+fn i_unexpose_prov() { let a: int = unexpose_prov(1); }
+
+fn v_copy_prov() { let a: *void = copy_prov(nullptr, 1); }
+fn v_copy_prov() { let a: *int = copy_prov(nullptr, 1); }
+fn v_copy_prov() { let a: *void = copy_prov(0 as *int, 1); }
+fn i_copy_prov() { let a: *void = copy_prov(1, 1); }
+fn i_copy_prov() { let a: *void = copy_prov(nullptr, nullptr); }
+fn i_copy_prov() { let a: int = copy_prov(nullptr, 1); }
+
