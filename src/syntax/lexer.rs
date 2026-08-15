@@ -77,6 +77,10 @@ pub enum TokenKind {
     Error,
     Tilde,
     At,
+    Shl,
+    Shr,
+    ShlEquals,
+    ShrEquals,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -312,12 +316,30 @@ impl<'a> Lexer<'a> {
                     self.iter.next();
                     TokenKind::GreaterOrEqual
                 }
+                Some((_, '>')) => {
+                    self.iter.next();
+                    if let Some((_, '=')) = self.iter.peek() {
+                        self.iter.next();
+                        TokenKind::ShrEquals
+                    } else {
+                        TokenKind::Shr
+                    }
+                }
                 _ => TokenKind::GreaterThan,
             },
             '<' => match self.iter.peek() {
                 Some((_, '=')) => {
                     self.iter.next();
                     TokenKind::LessOrEqual
+                }
+                Some((_, '<')) => {
+                    self.iter.next();
+                    if let Some((_, '=')) = self.iter.peek() {
+                        self.iter.next();
+                        TokenKind::ShlEquals
+                    } else {
+                        TokenKind::Shl
+                    }
                 }
                 _ => TokenKind::LessThan,
             },
@@ -635,4 +657,8 @@ fn test_lexer() {
     test("->", TokenKind::Arrow);
     test("~", TokenKind::Tilde);
     test("@", TokenKind::At);
+    test("<<", TokenKind::Shl);
+    test(">>", TokenKind::Shr);
+    test("<<=", TokenKind::ShlEquals);
+    test(">>=", TokenKind::ShrEquals);
 }

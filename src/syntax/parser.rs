@@ -1193,6 +1193,10 @@ impl<'t> Parser<'t> {
             TokenKind::CaretEqual => BinaryOpKind::XorAssign,
             TokenKind::PercentEqual => BinaryOpKind::ModAssign,
             TokenKind::Equal => BinaryOpKind::Assign,
+            TokenKind::Shl => BinaryOpKind::Shl,
+            TokenKind::Shr => BinaryOpKind::Shr,
+            TokenKind::ShlEquals => BinaryOpKind::ShlAssign,
+            TokenKind::ShrEquals => BinaryOpKind::ShrAssign,
             _ => unreachable!(),
         };
         let span = Span::new(lhs.span.start, rhs.span.end);
@@ -1320,6 +1324,7 @@ fn infix_binding_power(token: &TokenKind) -> Option<(u8, u8)> {
     Some(match token {
         TokenKind::Asterisk | TokenKind::Slash | TokenKind::Percent => (110, 111),
         TokenKind::Plus | TokenKind::Minus => (100, 101),
+        TokenKind::Shl | TokenKind::Shr => (94, 95),
         TokenKind::GreaterThan
         | TokenKind::LessThan
         | TokenKind::GreaterOrEqual
@@ -1339,7 +1344,9 @@ fn infix_binding_power(token: &TokenKind) -> Option<(u8, u8)> {
         | TokenKind::PipeEqual
         | TokenKind::CaretEqual
         | TokenKind::PercentEqual
-        | TokenKind::Equal => (10, 9),
+        | TokenKind::Equal
+        | TokenKind::ShlEquals
+        | TokenKind::ShrEquals => (10, 9),
         _ => return None,
     })
 }
@@ -1727,6 +1734,12 @@ mod tests {
         pub fn div(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Div)
         }
+        pub fn shl(lhs: Expr, rhs: Expr) -> Expr {
+            binop(lhs, rhs, BinaryOpKind::Shl)
+        }
+        pub fn shr(lhs: Expr, rhs: Expr) -> Expr {
+            binop(lhs, rhs, BinaryOpKind::Shr)
+        }
         pub fn eq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::Eq)
         }
@@ -1774,6 +1787,12 @@ mod tests {
         }
         pub fn diveq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::DivAssign)
+        }
+        pub fn shleq(lhs: Expr, rhs: Expr) -> Expr {
+            binop(lhs, rhs, BinaryOpKind::ShlAssign)
+        }
+        pub fn shreq(lhs: Expr, rhs: Expr) -> Expr {
+            binop(lhs, rhs, BinaryOpKind::ShrAssign)
         }
         pub fn andeq(lhs: Expr, rhs: Expr) -> Expr {
             binop(lhs, rhs, BinaryOpKind::BitAndAssign)
@@ -2173,6 +2192,10 @@ mod tests {
     #[test]
     fn test_expr_parsing_valid() {
         use utils::*;
+        compare_exprs("a << 1", shl(a(), num(1)));
+        compare_exprs("a >> 1", shr(a(), num(1)));
+        compare_exprs("a <<= 1", shleq(a(), num(1)));
+        compare_exprs("a >>= 1", shreq(a(), num(1)));
         compare_exprs("a as int", cast(a(), get_type("int")));
         compare_exprs("a+b", add(a(), b()));
         compare_exprs("a-b", sub(a(), b()));

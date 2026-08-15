@@ -260,7 +260,7 @@ impl<'a> SymbolTableBuilder<'a> {
 mod tests {
 
     use crate::{
-        analysis::ast_validator::ASTValidator,
+        analysis::ast_validator::AstValidator,
         syntax::{lexer::Lexer, parser::Parser},
     };
 
@@ -271,7 +271,7 @@ mod tests {
         assert!(res.errors.is_empty());
         let res = Parser::parse_test(&res.tokens, ctx);
         assert!(res.errors.is_empty());
-        let validation = ASTValidator::validate(&res.program, true, ctx);
+        let validation = AstValidator::validate(&res.program, true, ctx);
         assert!(validation.is_empty());
         SymbolTableBuilder::build(&res.program, ctx)
     }

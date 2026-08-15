@@ -336,6 +336,10 @@ pub enum BinaryOpKind {
     XorAssign,
     ModAssign,
     Assign,
+    Shl,
+    Shr,
+    ShlAssign,
+    ShrAssign,
 }
 
 impl BinaryOpKind {

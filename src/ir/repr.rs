@@ -174,8 +174,7 @@ pub enum Opcode {
     BitNot,
     Not,
     Shl,
-    Lshr,
-    AShr,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, Default)]

@@ -197,6 +197,10 @@ pub enum TypeCheckError {
         typ: TypeId,
         span: Span,
     },
+    InvalidLhsForShift {
+        typ: TypeId,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1094,6 +1098,30 @@ impl<'a> TypeChecker<'a> {
                     return None;
                 }
                 lhs_id
+            }
+            // Shift by non-constant is caught by AstValidator
+            BinaryOpKind::Shl | BinaryOpKind::Shr => {
+                if !lhs.is_int() {
+                    let span = self.ctx.get_expr(binop.left).span;
+                    self.errors
+                        .push(TypeCheckError::InvalidLhsForShift { typ: lhs_id, span });
+                    return None;
+                }
+                self.ctx.intern_type(Type::Int)
+            }
+            // Shift by non-constant is caught by AstValidator
+            BinaryOpKind::ShlAssign | BinaryOpKind::ShrAssign => {
+                if !lhs.is_int() {
+                    let span = self.ctx.get_expr(binop.left).span;
+                    self.errors
+                        .push(TypeCheckError::InvalidLhsForShift { typ: lhs_id, span });
+                    return None;
+                }
+                if !lhs_info.assignable {
+                    self.errors
+                        .push(TypeCheckError::LhsNotAssignable { span, op })
+                }
+                self.ctx.intern_type(Type::Int)
             }
         };
         let expr_type_info = ExprTypeInfo::new(id, false);
