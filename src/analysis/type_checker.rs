@@ -389,6 +389,8 @@ impl<'a> TypeChecker<'a> {
                 if let StmtKind::Block(block) = &self.ctx.get_stmt(body).kind {
                     let block = block.clone();
                     self.check_block(&block, func_ret, false);
+                } else {
+                    self.check_stmt(body, func_ret);
                 }
                 self.map.exit_scope();
             }

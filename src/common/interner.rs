@@ -93,6 +93,13 @@ impl<T> Interner<T> {
         let index = (id.index.get() - 1) as usize;
         self.arr.get(index).expect("Internal Compiler Error")
     }
+    pub fn get_mut(&mut self, id: Id<T>) -> &mut T {
+        if id.index.get() == u32::MAX {
+            panic!("Internal compiler error");
+        }
+        let index = (id.index.get() - 1) as usize;
+        self.arr.get_mut(index).expect("Internal Compiler Error")
+    }
 }
 
 macro_rules! define_id {
@@ -134,6 +141,9 @@ macro_rules! define_id {
             }
             pub fn get(&self, id: $id) -> &$typ {
                 self.0.get(id.0)
+            }
+            pub fn get_mut(&mut self, id: $id) -> &mut $typ {
+                self.0.get_mut(id.0)
             }
             pub fn intern(&mut self, item: $typ) -> $id {
                 $id(self.0.intern(item))
