@@ -291,6 +291,20 @@ pub struct Ident {
     pub id: NodeId,
 }
 
+impl PartialEq for Ident {
+    fn eq(&self, other: &Self) -> bool {
+        self.sym == other.sym
+    }
+}
+
+impl Eq for Ident {}
+
+impl std::hash::Hash for Ident {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.sym.hash(state);
+    }
+}
+
 impl CtxEq for Ident {
     fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
         self.sym.ctx_eq(&other.sym, ctx)

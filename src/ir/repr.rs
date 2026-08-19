@@ -10,12 +10,16 @@ pub mod arenas {
     define_arena!(Block, BlockId, BlockArena);
     define_arena!(Value, ValueId, ValueArena);
     define_arena!(StackSlot, StackSlotId, StackSlotArena);
-    define_arena!(Type, TypeId, TypeArena; dedup);
     define_arena!(Provenance, ProvenanceId, ProvenanceArena; dedup);
+    impl InstId {
+        fn invalid() -> Self {
+            Self::default()
+        }
+    }
 }
 pub use arenas::*;
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+#[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum Type {
     I64,
     Ptr,
@@ -44,21 +48,19 @@ pub enum Provenance {
     Exposed,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Hash)]
-pub enum ValueKind {
-    InstResult { inst: InstId, index: u16 },
-    BlockArg { block: BlockId, index: u16 },
-}
-
 #[derive(Clone, Debug)]
 pub struct BranchTarget {
     pub target: BlockId,
-    pub args: TinyVec<[ValueId; 5]>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct PhiOperand {
+    pub block: BlockId,
+    pub value: ValueId,
 }
 
 #[derive(Debug, Clone)]
 pub struct Block {
-    pub params: TinyVec<[ValueId; 4]>,
     pub insts: Vec<InstId>,
     pub preds: TinyVec<[BlockId; 4]>,
     pub succs: TinyVec<[BlockId; 4]>,
@@ -84,11 +86,28 @@ pub enum StackSlotKind {
 }
 #[derive(Debug, Clone)]
 pub struct Value {
-    pub typ: TypeId,
-    pub kind: ValueKind,
+    pub undef: bool,
+    pub typ: Type,
+    pub inst: InstId,
+    pub index: u32,
     pub dbg_name: Option<Symbol>,
     pub uses: TinyVec<[InstId; 4]>,
 }
+
+impl Value {
+    pub fn add_use(&mut self, id: InstId) {
+        self.uses.push(id);
+    }
+    pub fn remove_use(&mut self, id: InstId) {
+        let pos = self
+            .uses
+            .iter()
+            .rposition(|inst| *inst == id)
+            .expect("Remove use called with non-used?");
+        self.uses.remove(pos);
+    }
+}
+
 #[derive(Debug, Clone)]
 pub enum InstExtraData {
     ConstInt(i64),
@@ -112,7 +131,40 @@ pub enum InstExtraData {
     Jump {
         target: BranchTarget,
     },
+    Phi {
+        operands: TinyVec<[PhiOperand; 4]>,
+    },
+    None,
 }
+
+impl InstExtraData {
+    pub fn as_phi_args(&mut self) -> Option<&mut TinyVec<[PhiOperand; 4]>> {
+        if let InstExtraData::Phi { operands: args } = self {
+            Some(args)
+        } else {
+            None
+        }
+    }
+    pub fn as_jmp_target(&mut self) -> Option<&mut BranchTarget> {
+        if let InstExtraData::Jump { target } = self {
+            Some(target)
+        } else {
+            None
+        }
+    }
+    pub fn as_branch_targets(&mut self) -> Option<(&mut BranchTarget, &mut BranchTarget)> {
+        if let InstExtraData::Branch {
+            then_target,
+            else_target,
+        } = self
+        {
+            Some((then_target, else_target))
+        } else {
+            None
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct Instruction {
     pub op: Opcode,
@@ -120,15 +172,16 @@ pub struct Instruction {
     pub span: Span,
     pub operands: TinyVec<[ValueId; 2]>,
     pub results: TinyVec<[ValueId; 2]>,
-    pub extra: Option<InstExtraData>,
+    pub extra: InstExtraData,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
     GetStackAddr,
     FieldAddr,
     IndexAddr,
 
+    Phi,
     Jmp,
     Branch,
     LoadConst,
@@ -205,7 +258,7 @@ pub struct FunctionParam {
 #[derive(Debug, Clone)]
 pub struct FunctionSignature {
     pub params: TinyVec<[FunctionParam; 5]>,
-    pub ret: TypeId,
+    pub ret: Type,
 }
 
 #[derive(Debug, Clone)]

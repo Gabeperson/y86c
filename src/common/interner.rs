@@ -44,6 +44,13 @@ impl<T> Clone for Id<T> {
     }
 }
 
+impl<T> Id<T> {
+    pub fn get(self) -> u32 {
+        // So ids are contiguous from 0
+        self.index.get() - 1
+    }
+}
+
 #[derive(Clone, Debug)]
 pub struct Interner<T> {
     map: AHashMap<T, Id<T>>,
@@ -86,6 +93,21 @@ impl<T> Interner<T> {
             _marker: PhantomData,
         }
     }
+    pub fn intern_mut(&mut self, item: T) -> (Id<T>, &mut T) {
+        let idx = self.arr.len() as u32 + 1;
+        let item = self.arr.push_mut(item);
+        if idx == u32::MAX {
+            panic!("More than 4 billion entries...?");
+        }
+        let nonzero = NonZeroU32::new(idx).unwrap();
+        (
+            Id {
+                index: nonzero,
+                _marker: PhantomData,
+            },
+            item,
+        )
+    }
     pub fn get(&self, id: Id<T>) -> &T {
         if id.index.get() == u32::MAX {
             panic!("Internal compiler error");
@@ -99,6 +121,20 @@ impl<T> Interner<T> {
         }
         let index = (id.index.get() - 1) as usize;
         self.arr.get_mut(index).expect("Internal Compiler Error")
+    }
+    pub fn maybe_get(&mut self, id: Id<T>) -> Option<&T> {
+        if id.index.get() == u32::MAX {
+            return None;
+        }
+        let index = (id.index.get() - 1) as usize;
+        self.arr.get(index)
+    }
+    pub fn maybe_get_mut(&mut self, id: Id<T>) -> Option<&mut T> {
+        if id.index.get() == u32::MAX {
+            return None;
+        }
+        let index = (id.index.get() - 1) as usize;
+        self.arr.get_mut(index)
     }
 }
 
@@ -126,6 +162,11 @@ macro_rules! define_id {
                 self.0 == other.0
             }
         }
+        impl $id {
+            pub fn get(self) -> u32 {
+                self.0.get()
+            }
+        }
         #[derive(Debug, Clone)]
         pub struct $arena($crate::common::interner::Interner<$typ>);
 
@@ -147,6 +188,16 @@ macro_rules! define_id {
             }
             pub fn intern(&mut self, item: $typ) -> $id {
                 $id(self.0.intern(item))
+            }
+            pub fn maybe_get(&mut self, id: $id) -> Option<&$typ> {
+                self.0.maybe_get(id.0)
+            }
+            pub fn maybe_get_mut(&mut self, id: $id) -> Option<&mut $typ> {
+                self.0.maybe_get_mut(id.0)
+            }
+            pub fn intern_mut(&mut self, item: $typ) -> ($id, &mut $typ) {
+                let (id, item) = self.0.intern_mut(item);
+                ($id(id), item)
             }
         }
     };
