@@ -1,4 +1,5 @@
 use crate::common::symbol::Symbol;
+use crate::common::{CallingConvention, Inline};
 use crate::{
     common::span::Span,
     syntax::context::{Context, ExprId, StmtId, TypeId},
@@ -740,19 +741,6 @@ impl CtxEq for StructDeclaration {
     fn ctx_eq(&self, other: &Self, ctx: &Context) -> bool {
         self.name.ctx_eq(&other.name, ctx) && self.fields.ctx_eq(&other.fields, ctx)
     }
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum Inline {
-    Auto,
-    Always,
-    Never,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum CallingConvention {
-    Internal,
-    Abi,
 }
 
 #[derive(Debug, Clone)]

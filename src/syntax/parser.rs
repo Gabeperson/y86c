@@ -2,6 +2,7 @@ use tinyvec::TinyVec;
 
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
+use crate::common::{CallingConvention, Inline};
 use crate::syntax::ast::*;
 use crate::syntax::context::Context;
 use crate::syntax::lexer::{KeywordKind, Token, TokenKind};

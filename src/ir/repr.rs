@@ -1,7 +1,7 @@
 use ahash::AHashMap;
-use tinyvec::TinyVec;
+use tinyvec::{TinyVec, tiny_vec};
 
-use crate::common::{span::Span, symbol::Symbol};
+use crate::common::{CallingConvention, Inline, span::Span, symbol::Symbol};
 
 pub mod arenas {
     use super::*;
@@ -11,6 +11,8 @@ pub mod arenas {
     define_arena!(Value, ValueId, ValueArena);
     define_arena!(StackSlot, StackSlotId, StackSlotArena);
     define_arena!(Provenance, ProvenanceId, ProvenanceArena; dedup);
+    define_arena!(StructInfo, StructId, StructArena; dedup);
+    define_arena!(Type, TypeId, TypeArena; dedup);
     impl InstId {
         fn invalid() -> Self {
             Self::default()
@@ -26,6 +28,16 @@ pub enum Type {
     FnPtr,
     Void,
     Memory,
+    Struct(StructId),
+    Array { element: TypeId, len: u64 },
+}
+
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct StructInfo {
+    pub size: u64,
+    pub align: u64,
+    pub offsets: TinyVec<[u64; 4]>,
+    pub field_types: TinyVec<[TypeId; 4]>,
 }
 
 #[derive(Debug, Clone, PartialEq, Copy, Eq, Hash)]
@@ -65,12 +77,11 @@ pub struct Block {
     pub preds: TinyVec<[BlockId; 4]>,
     pub succs: TinyVec<[BlockId; 4]>,
     pub dbg_name: Option<Symbol>,
-    pub span: Span,
 }
 #[derive(Debug, Clone)]
 pub struct StackSlot {
-    pub size: u32,
-    pub align: u32,
+    pub size: u64,
+    pub align: u64,
     pub dbg_name: Option<Symbol>,
     pub kind: StackSlotKind,
     pub frame_offset: Option<i32>,
@@ -79,15 +90,15 @@ pub struct StackSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StackSlotKind {
     AddressTakenLocal,
-    // structs or arrs
-    Aggregate,
-    FnArgument,
+    Array,
+    FnArgument { typ: TypeId },
     Spill,
 }
+
 #[derive(Debug, Clone)]
 pub struct Value {
     pub undef: bool,
-    pub typ: Type,
+    pub typ: TypeId,
     pub inst: InstId,
     pub index: u32,
     pub dbg_name: Option<Symbol>,
@@ -95,6 +106,16 @@ pub struct Value {
 }
 
 impl Value {
+    pub fn new(typ: TypeId, inst: InstId, index: u32, dbg_name: Option<Symbol>) -> Self {
+        Self {
+            undef: false,
+            typ,
+            inst,
+            index,
+            dbg_name,
+            uses: tiny_vec![[InstId; 4] => inst],
+        }
+    }
     pub fn add_use(&mut self, id: InstId) {
         self.uses.push(id);
     }
@@ -114,15 +135,20 @@ pub enum InstExtraData {
     StackSlot(StackSlotId),
     Global(Symbol),
     Function(Symbol),
+    ElementType(TypeId),
+    ParamIndex {
+        index: u32,
+    },
     Struct {
         sym: Symbol,
     },
     StructField {
         struct_sym: Symbol,
-        field: Symbol,
+        field: u32,
     },
-    ElementSize {
-        size: u32,
+    ElementInfo {
+        size: u64,
+        align: u64,
     },
     Branch {
         then_target: BranchTarget,
@@ -180,7 +206,11 @@ pub enum Opcode {
     GetStackAddr,
     FieldAddr,
     IndexAddr,
+    ExtractValue,
+    InsertValue,
+    MakeStruct,
 
+    Param,
     Phi,
     Jmp,
     Branch,
@@ -194,11 +224,6 @@ pub enum Opcode {
     ExposeProvenance,
     UnexposeProvenance,
     NewProvenance,
-    // Technically this is same as arraycopy (which is memcpy/memmove) but
-    // can be optimized in later stages from memcpy/memmove to
-    // "load each field and write each field" which gets rid of
-    // function call/return overhead and copying padding bytes
-    StructCopy,
     ArrayCopy,
     LoadGlobalLoc,
     Nop,
@@ -238,27 +263,15 @@ pub enum FunctionParamKind {
 }
 
 #[derive(Debug, Clone, Copy, Default)]
-pub enum FunctionParamType {
-    #[default]
-    Int,
-    Ptr,
-    FnPtr,
-    Aggregate {
-        size: u32,
-        align: u32,
-    },
-}
-
-#[derive(Debug, Clone, Copy, Default)]
 pub struct FunctionParam {
     pub kind: FunctionParamKind,
-    pub typ: FunctionParamType,
+    pub typ: TypeId,
 }
 
 #[derive(Debug, Clone)]
 pub struct FunctionSignature {
     pub params: TinyVec<[FunctionParam; 5]>,
-    pub ret: Type,
+    pub ret: TypeId,
 }
 
 #[derive(Debug, Clone)]
@@ -267,6 +280,8 @@ pub struct Function {
     pub sig: FunctionSignature,
     pub entry: BlockId,
     pub span: Span,
+    pub inline: Inline,
+    pub cc: CallingConvention,
 
     pub blocks: BlockArena,
     pub stack_slots: StackSlotArena,
@@ -274,4 +289,6 @@ pub struct Function {
     pub values: ValueArena,
     pub provenances: ProvenanceArena,
     pub value_provenances: AHashMap<ValueId, ProvenanceId>,
+    pub structs: StructArena,
+    pub types: TypeArena,
 }
