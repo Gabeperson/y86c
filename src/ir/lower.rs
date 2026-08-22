@@ -1,3 +1,5 @@
+use std::ops::ControlFlow;
+
 use ahash::AHashMap;
 use tinyvec::{TinyVec, tiny_vec};
 
@@ -5,12 +7,13 @@ use crate::analysis::symbol_table::SymbolTable;
 use crate::analysis::type_checker::ExprTypeInfo;
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
-use crate::ir::lower_prepass::LoweringPrepassOutput;
+use crate::ir::lower_prepass::{self as prepass, LoweringPrepassOutput};
 use crate::ir::repr::*;
-use crate::syntax::ast::{
-    self, CopyProvenance, FunctionDeclaration, Ident, NodeId, Program, SizeOfType,
-};
-use crate::syntax::context::Context;
+use crate::syntax::ast::{self, NodeId, Program};
+
+use crate::syntax::context::{Context, ExprId, StmtId};
+
+const MEM_SYM: &str = "_MEM";
 #[derive(Debug)]
 pub struct Lowerer<'a> {
     prepass: &'a LoweringPrepassOutput,
@@ -32,6 +35,19 @@ impl<'a> Lowerer<'a> {
     fn lower_function(&mut self, decl: &ast::FunctionDeclaration) {}
 }
 
+#[derive(Debug, Clone, Copy)]
+pub struct LoopBlocks {
+    cont: BlockId,
+    brk: BlockId,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct ExprResult {
+    ret: ValueId,
+    block: BlockId,
+    place: Option<ValueId>,
+}
+
 #[derive(Debug)]
 pub struct FunctionLowerer<'a> {
     prepass: &'a LoweringPrepassOutput,
@@ -39,12 +55,18 @@ pub struct FunctionLowerer<'a> {
     ctx: &'a mut Context,
     type_table: &'a AHashMap<NodeId, ExprTypeInfo>,
     function: &'a mut Function,
-    mem_sym: Symbol,
+    sret: ValueId,
 
-    current_def: &'a mut Vec<AHashMap<Symbol, ValueId>>,
-    incomplete_phis: &'a mut Vec<AHashMap<Ident, ValueId>>,
+    current_def: &'a mut Vec<AHashMap<VarId, ValueId>>,
+    incomplete_phis: &'a mut Vec<AHashMap<VarId, ValueId>>,
     sealed_blocks: &'a mut Vec<bool>,
     aliases: &'a mut AHashMap<ValueId, ValueId>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum VarId {
+    Mem,
+    Id(prepass::VarId),
 }
 
 impl<'a> FunctionLowerer<'a> {
@@ -56,11 +78,34 @@ impl<'a> FunctionLowerer<'a> {
             dbg_name: Some(self.ctx.intern_symbol("Entry")),
         };
         let block = self.function.blocks.intern(entry_block);
-        for (name, typ) in &decl.params {
+        let mut sret_add = 0;
+        if let Some(return_type) = decl.return_type
+            && let typ = self.ctx.get_type(return_type.inner)
+            && (typ.is_struct() || typ.is_array())
+        {
+            let typ_id = self.ast_to_ir_type(return_type.inner);
+            let sret = self.ctx.intern_symbol("sret");
+            let (val_id, _, val, inst) =
+                self.new_inst1(Opcode::Param, block, return_type.span, &[], typ_id);
+            inst.extra = InstExtraData::ParamIndex { index: 0 };
+            val.dbg_name = Some(sret);
+            self.sret = val_id;
+            sret_add = 1;
+        }
+        for (i, (name, typ)) in decl.params.iter().enumerate() {
             let (size, align) = layout_of_ast_type(typ.inner, self.symbol_table, self.ctx);
             let typ_id = self.ast_to_ir_type(typ.inner);
             let typ = self.function.types.get(typ_id);
-            let val_id = match typ {
+            let var_id = *self
+                .prepass
+                .id_map
+                .get(&name.id)
+                .expect("Function param should be inserted");
+
+            // TODO: provenances
+            // TODO: value uses
+            // TODO: seal block
+            match typ {
                 Type::Memory | Type::Void => unreachable!(),
                 Type::I64 | Type::Ptr | Type::FnPtr
                     if let id = self
@@ -71,7 +116,13 @@ impl<'a> FunctionLowerer<'a> {
                         && let var = self.prepass.vars.get(*id)
                         && !var.address_taken =>
                 {
-                    todo!()
+                    let (val_id, _, val, inst) =
+                        self.new_inst1(Opcode::Param, block, name.span, &[], typ_id);
+                    inst.extra = InstExtraData::ParamIndex {
+                        index: (i + sret_add) as u32,
+                    };
+                    val.dbg_name = Some(name.sym);
+                    self.write_variable(VarId::Id(var_id), block, val_id);
                 }
                 _ => {
                     let stackslot = StackSlot {
@@ -82,92 +133,715 @@ impl<'a> FunctionLowerer<'a> {
                         frame_offset: None,
                     };
                     let slot_id = self.function.stack_slots.intern(stackslot);
-                    let inst = Instruction {
-                        op: Opcode::GetStackAddr,
-                        block,
-                        span: name.span,
-                        operands: TinyVec::new(),
-                        results: TinyVec::new(),
-                        extra: InstExtraData::StackSlot(slot_id),
-                    };
-                    let (inst_id, inst) = self.function.insts.intern_mut(inst);
-                    let value = Value::new(
-                        self.function.types.intern_deduplicated(Type::Ptr),
-                        inst_id,
-                        0,
-                        Some(name.sym),
-                    );
-                    let val_id = self.function.values.intern(value);
-                    inst.results.push(val_id);
-                    self.write_variable(name.sym, block, val_id);
-                    val_id
+
+                    let ptr_typ = self.function.types.intern_deduplicated(Type::Ptr);
+                    let (val_id, _, val, inst) =
+                        self.new_inst1(Opcode::GetStackAddr, block, name.span, &[], ptr_typ);
+                    inst.extra = InstExtraData::StackSlot(slot_id);
+                    val.dbg_name = Some(name.sym);
+
+                    self.write_variable(VarId::Id(var_id), block, val_id);
+                    let typ = self.function.types.get(typ_id);
+                    if let Type::Struct(_struct_id) = typ
+                        && let id = self
+                            .prepass
+                            .id_map
+                            .get(&name.id)
+                            .expect("Should be inserted")
+                        && let var = self.prepass.vars.get(*id)
+                        && !var.address_taken
+                    {
+                        let mem = self.read_variable(VarId::Mem, block);
+                        let (val_id, _, val, inst) =
+                            self.new_inst1(Opcode::Load, block, name.span, &[val_id, mem], typ_id);
+                        inst.extra = InstExtraData::ElementType(typ_id);
+                        val.dbg_name = Some(name.sym);
+                        self.write_variable(VarId::Id(var_id), block, val_id);
+                    }
                 }
-            };
-            let typ = self.function.types.get(typ_id);
-            if let Type::Struct(_struct_id) = typ
-                && let id = self
-                    .prepass
-                    .id_map
-                    .get(&name.id)
-                    .expect("Should be inserted")
-                && let var = self.prepass.vars.get(*id)
-                && !var.address_taken
-            {
-                let mem = self.read_variable(self.mem_sym;
-                let inst = Instruction {
-                    op: Opcode::Load,
-                    block,
-                    span: name.span,
-                    operands: tiny_vec![[ValueId; 2] => val_id],
-                    results: TinyVec::new(),
-                    extra: InstExtraData::ElementType(typ_id),
-                };
-                let (inst_id, inst) = self.function.insts.intern_mut(inst);
-                let value = Value::new(typ_id, inst_id, 0, Some(name.sym));
-                let val_id = self.function.values.intern(value);
-                inst.results.push()
             }
         }
-        self.lower_block(&decl.body, block);
+        let cf_res = self.lower_block(&decl.body, block, None);
+        std::assert_matches!(cf_res, ControlFlow::Continue(_));
     }
-    fn lower_block(&mut self, body: &ast::Block, block_id: BlockId) {}
-    fn lower_stmt(&mut self, stmt: &ast::Stmt, block_id: BlockId) {}
-    fn lower_assert(&mut self, assert: &ast::Assert, block_id: BlockId) {}
-    fn lower_break(&mut self, brk: &ast::Break, block_id: BlockId) {}
-    fn lower_continue(&mut self, cont: &ast::Continue, block_id: BlockId) {}
-    fn lower_ifstmt(&mut self, ifstmt: &ast::IfStmt, block_id: BlockId) {}
-    fn lower_while(&mut self, ifstmt: &ast::IfStmt, block_id: BlockId) {}
-    fn lower_for(&mut self, ifstmt: &ast::IfStmt, block_id: BlockId) {}
-    fn lower_return(&mut self, ifstmt: &ast::IfStmt, block_id: BlockId) {}
-    fn lower_var_decl(&mut self, ifstmt: &ast::IfStmt, block_id: BlockId) {}
-    fn lower_expr(&mut self, expr: &ast::Expr, block_id: BlockId) {}
-    fn lower_nullptr(&mut self, nullptr: &ast::Expr, block_id: BlockId) {}
-    fn lower_cast(&mut self, cast: &ast::Cast, block_id: BlockId) {}
-    fn lower_ident(&mut self, ident: &ast::Cast, block_id: BlockId) {}
-    fn lower_int(&mut self, int: &ast::Int, block_id: BlockId) {}
-    fn lower_binary_op(&mut self, binop: &ast::BinaryOp, block_id: BlockId) {}
-    fn lower_prefix_op(&mut self, prefixop: &ast::PrefixOp, block_id: BlockId) {}
-    fn lower_postfix_op(&mut self, postfixop: &ast::PostfixOp, block_id: BlockId) {}
-    fn lower_ternary(&mut self, ternary: &ast::Ternary, block_id: BlockId) {}
-    fn lower_function_call(&mut self, funccall: &ast::FunctionCall, block_id: BlockId) {}
-    fn lower_array_index(&mut self, arrayindex: &ast::ArrayIndex, block_id: BlockId) {}
-    fn lower_size_of_type(&mut self, size_of_type: &ast::SizeOfType, block_id: BlockId) {}
-    fn lower_struct_init(&mut self, struct_init: &ast::StructInit, block_id: BlockId) {}
-    fn lower_array_init(&mut self, array_init: &ast::ArrayInit, block_id: BlockId) {}
-    fn lower_member_access(&mut self, member_access: &ast::MemberAccess, block_id: BlockId) {}
+    fn lower_block(
+        &mut self,
+        block: &ast::Block,
+        mut block_id: BlockId,
+        loop_blocks: Option<LoopBlocks>,
+    ) -> ControlFlow<(), BlockId> {
+        for stmt in &block.body {
+            let next = self.lower_stmt(*stmt, block_id, loop_blocks)?;
+            block_id = next;
+        }
+        ControlFlow::Continue(block_id)
+    }
+    fn lower_stmt(
+        &mut self,
+        stmt: StmtId,
+        block_id: BlockId,
+        loop_blocks: Option<LoopBlocks>,
+    ) -> ControlFlow<(), BlockId> {
+        let stmt = self.ctx.get_stmt(stmt);
+        match &stmt.kind {
+            ast::StmtKind::Assert(assert) => self.lower_assert(*assert, block_id),
+            ast::StmtKind::Break(brk) => {
+                self.lower_break(*brk, block_id, loop_blocks);
+                ControlFlow::Break(())
+            }
+            ast::StmtKind::Continue(cont) => {
+                self.lower_continue(*cont, block_id, loop_blocks);
+                ControlFlow::Break(())
+            }
+            ast::StmtKind::Block(block) => self.lower_block(&block.clone(), block_id, loop_blocks),
+            ast::StmtKind::IfStmt(if_stmt) => self.lower_ifstmt(*if_stmt, block_id, loop_blocks),
+            ast::StmtKind::WhileLoop(while_loop) => self.lower_while(*while_loop, block_id),
+            ast::StmtKind::ForLoop(for_loop) => self.lower_for(*for_loop, block_id),
+            ast::StmtKind::ReturnStmt(return_stmt) => {
+                self.lower_return(*return_stmt, block_id);
+                ControlFlow::Break(())
+            }
+            ast::StmtKind::VariableDeclaration(var_decl) => {
+                self.lower_var_decl(*var_decl, block_id)
+            }
+            ast::StmtKind::Expr(expr_id) => {
+                let (_val, next) = self.lower_expr(*expr_id, block_id, false);
+                ControlFlow::Continue(next)
+            }
+        }
+    }
+    fn lower_assert(&mut self, assert: ast::Assert, block_id: BlockId) -> ControlFlow<(), BlockId> {
+        let (res, block) = self.lower_expr(assert.condition, block_id, false);
+        self.new_inst0(Opcode::Assert, block, assert.span, &[res]);
+        ControlFlow::Continue(block)
+    }
+    fn lower_break(&mut self, brk: ast::Break, block_id: BlockId, loop_blocks: Option<LoopBlocks>) {
+        let loop_blocks = loop_blocks.expect("Should be checked in AST Validation");
+        let inst = Instruction::new_jmp(block_id, brk.span, loop_blocks.brk);
+        let inst_id = self.function.insts.intern(inst);
+        self.function.blocks.get_mut(block_id).insts.push(inst_id);
+        self.connect(block_id, loop_blocks.brk);
+    }
+    fn lower_continue(
+        &mut self,
+        cont: ast::Continue,
+        block_id: BlockId,
+        loop_blocks: Option<LoopBlocks>,
+    ) {
+        let loop_blocks = loop_blocks.expect("Should be checked in AST Validation");
+        let inst = Instruction::new_jmp(block_id, cont.span, loop_blocks.cont);
+        let inst_id = self.function.insts.intern(inst);
+        self.function.blocks.get_mut(block_id).insts.push(inst_id);
+        self.connect(block_id, loop_blocks.cont)
+    }
+    fn lower_ifstmt(
+        &mut self,
+        ifstmt: ast::IfStmt,
+        block_id: BlockId,
+        loop_blocks: Option<LoopBlocks>,
+    ) -> ControlFlow<(), BlockId> {
+        let (cond, cond_block) = self.lower_expr(ifstmt.condition, block_id, false);
+        let if_true = self.ctx.intern_symbol("if_true");
+        let if_false = self.ctx.intern_symbol("if_false");
+        let if_end = self.ctx.intern_symbol("if_end");
+        let true_block_id = self.new_block(if_true);
+        let false_blockid_stmtid = ifstmt
+            .else_branch
+            .map(|else_branch| (self.new_block(if_false), else_branch));
+        let end_block_id = self.new_block(if_end);
+        let false_target_id = if let Some((false_block, _stmt_id)) = false_blockid_stmtid {
+            false_block
+        } else {
+            end_block_id
+        };
+        self.connect(cond_block, true_block_id);
+        self.connect(cond_block, false_target_id);
+        let inst = Instruction::new_branch(
+            cond_block,
+            ifstmt.span,
+            cond,
+            true_block_id,
+            false_target_id,
+        );
+        let inst_id = self.function.insts.intern(inst);
+        self.function.blocks.get_mut(cond_block).insts.push(inst_id);
+        let true_cf = self.lower_stmt(ifstmt.then_branch, true_block_id, loop_blocks);
+        let false_cf = if let Some((block_id, stmt_id)) = false_blockid_stmtid {
+            self.lower_stmt(stmt_id, block_id, loop_blocks)
+        } else {
+            ControlFlow::Continue(end_block_id)
+        };
+        for cf in [true_cf, false_cf] {
+            if let ControlFlow::Continue(block) = cf {
+                if block == end_block_id {
+                    continue;
+                }
+                let inst = Instruction::new_jmp(block, ifstmt.span, end_block_id);
+                let inst_id = self.function.insts.intern(inst);
+                self.function
+                    .blocks
+                    .get_mut(end_block_id)
+                    .insts
+                    .push(inst_id);
+                self.connect(block, end_block_id);
+            }
+        }
+        if let (ControlFlow::Break(()), ControlFlow::Break(())) = (true_cf, false_cf) {
+            // If both branches diverge then we dont even need to codegen stuff after it
+            ControlFlow::Break(())
+        } else {
+            ControlFlow::Continue(end_block_id)
+        }
+    }
+    fn lower_while(
+        &mut self,
+        while_loop: ast::WhileLoop,
+        block_id: BlockId,
+    ) -> ControlFlow<(), BlockId> {
+        let while_start = self.ctx.intern_symbol("while_start");
+        let while_body = self.ctx.intern_symbol("while_body");
+        let while_end = self.ctx.intern_symbol("while_end");
+        let start_block = self.new_block(while_start);
+        let body_block = self.new_block(while_body);
+        let end_block = self.new_block(while_end);
+        // origin block always jumps to start block for cond eval
+        self.connect(block_id, start_block);
+        let inst = Instruction::new_jmp(block_id, while_loop.span, start_block);
+        let inst_id = self.function.insts.intern(inst);
+        self.function.blocks.get_mut(block_id).insts.push(inst_id);
+        // start block checks cond, then branches to either loop body or the loop end
+        let (val, val_block) = self.lower_expr(while_loop.condition, start_block, false);
+        let inst = Instruction::new_branch(val_block, while_loop.span, val, body_block, end_block);
+        let inst_id = self.function.insts.intern(inst);
+        self.function.blocks.get_mut(val_block).insts.push(inst_id);
+        self.connect(start_block, body_block);
+        self.connect(start_block, end_block);
+
+        let loop_blocks = LoopBlocks {
+            cont: start_block,
+            brk: end_block,
+        };
+        match self.lower_stmt(while_loop.body, body_block, Some(loop_blocks)) {
+            ControlFlow::Continue(block) => {
+                let inst = Instruction::new_jmp(block, while_loop.span, start_block);
+                let inst_id = self.function.insts.intern(inst);
+                self.function.blocks.get_mut(block).insts.push(inst_id);
+                self.connect(block, start_block);
+            }
+            ControlFlow::Break(()) => {}
+        }
+        ControlFlow::Continue(end_block)
+    }
+    fn lower_for(&mut self, for_loop: ast::ForLoop, block_id: BlockId) -> ControlFlow<(), BlockId> {
+        let for_start = self.ctx.intern_symbol("for_start");
+        let for_body = self.ctx.intern_symbol("for_body");
+        let for_post = self.ctx.intern_symbol("for_post");
+        let for_end = self.ctx.intern_symbol("for_end");
+
+        let start_block = self.new_block(for_start);
+        let body_block = self.new_block(for_body);
+        let post_block = self.new_block(for_post);
+        let end_block = self.new_block(for_end);
+
+        let origin_block = if let Some(init) = for_loop.init {
+            let ControlFlow::Continue(cont_block) = self.lower_stmt(init, block_id, None) else {
+                unreachable!()
+            };
+            cont_block
+        } else {
+            block_id
+        };
+
+        // origin block always jmps to start block
+        let inst = Instruction::new_jmp(origin_block, for_loop.span, start_block);
+        let inst_id = self.function.insts.intern(inst);
+        self.function
+            .blocks
+            .get_mut(origin_block)
+            .insts
+            .push(inst_id);
+        self.connect(origin_block, start_block);
+
+        // start block checks cond then branches to either loop body or end
+        if let Some(cond) = for_loop.condition {
+            let (cond, next) = self.lower_expr(cond, start_block, false);
+            let inst = Instruction::new_branch(next, for_loop.span, cond, body_block, end_block);
+            let inst_id = self.function.insts.intern(inst);
+            self.function.blocks.get_mut(next).insts.push(inst_id);
+            self.connect(next, body_block);
+            self.connect(next, end_block);
+        } else {
+            let inst = Instruction::new_jmp(start_block, for_loop.span, body_block);
+            let inst_id = self.function.insts.intern(inst);
+            self.function
+                .blocks
+                .get_mut(start_block)
+                .insts
+                .push(inst_id);
+            self.connect(start_block, body_block);
+        }
+        let loop_blocks = LoopBlocks {
+            cont: if for_loop.post.is_some() {
+                post_block
+            } else {
+                start_block
+            },
+            brk: end_block,
+        };
+        match self.lower_stmt(for_loop.body, body_block, Some(loop_blocks)) {
+            ControlFlow::Continue(cont) => {
+                let inst = Instruction::new_jmp(cont, for_loop.span, post_block);
+                let inst_id = self.function.insts.intern(inst);
+                self.function.blocks.get_mut(cont).insts.push(inst_id);
+                self.connect(cont, post_block);
+            }
+            ControlFlow::Break(()) => {}
+        }
+        if let Some(post) = for_loop.post {
+            let (_val, post_end_block) = self.lower_expr(post, post_block, false);
+            let uses_post = !self.function.blocks.get(post_block).preds.is_empty();
+            if uses_post {
+                let inst = Instruction::new_jmp(post_end_block, for_loop.span, start_block);
+                let inst_id = self.function.insts.intern(inst);
+                let block = self.function.blocks.get_mut(post_end_block);
+                block.insts.push(inst_id);
+                self.connect(post_end_block, start_block);
+            }
+        }
+        ControlFlow::Continue(end_block)
+    }
+    fn lower_return(&mut self, return_stmt: ast::ReturnStmt, block_id: BlockId) {
+        let (block, val) = if let Some(expr) = return_stmt.value {
+            let (val, block) = self.lower_expr(expr, block_id, false);
+            (block, Some(val))
+        } else {
+            (block_id, None)
+        };
+        let ret_type_id = self.function.sig.ret;
+        let ret_type = self.function.types.get(ret_type_id);
+        if ret_type.is_struct() || ret_type.is_array() {
+            let mem_typ = self.function.types.intern_deduplicated(Type::Memory);
+            let mem_sym = self.ctx.intern_symbol(MEM_SYM);
+
+            let (val_id, _, val, _) = self.new_inst1(
+                Opcode::Store,
+                block,
+                return_stmt.span,
+                &[val.expect("Should be caught in type checking"), self.sret],
+                mem_typ,
+            );
+            val.dbg_name = Some(mem_sym);
+
+            self.write_variable(VarId::Mem, block, val_id);
+
+            let mem_val = self.read_variable(VarId::Mem, block);
+            self.new_inst0(Opcode::Return, block, return_stmt.span, &[mem_val]);
+        } else {
+            let ops = if let Some(val) = val {
+                &[val]
+            } else {
+                &[] as &[ValueId]
+            };
+            self.new_inst0(Opcode::Return, block, return_stmt.span, ops);
+        }
+    }
+    fn lower_var_decl(
+        &mut self,
+        var_decl: ast::VariableDeclaration,
+        block_id: BlockId,
+    ) -> ControlFlow<(), BlockId> {
+        // TODO ref-taken
+        // TODO array & struct inits
+        let (next, expr) = if let Some(expr) = var_decl.init_value {
+            let (expr, next) = self.lower_expr(expr, block_id, false);
+            (next, Some(expr))
+        } else {
+            (block_id, None)
+        };
+        if let Some(expr) = expr {
+            let id = self
+                .prepass
+                .id_map
+                .get(&var_decl.name.id)
+                .expect("Should be added");
+            self.write_variable(VarId::Id(*id), next, expr);
+        }
+        ControlFlow::Continue(next)
+    }
+
+    fn lower_expr(
+        &mut self,
+        expr: ExprId,
+        block_id: BlockId,
+        addr_taken: bool,
+    ) -> (ValueId, BlockId) {
+        let expr = self.ctx.get_expr(expr);
+        match expr.kind.clone() {
+            ast::ExprKind::Nullptr(nullptr) => self.lower_nullptr(nullptr, block_id),
+            ast::ExprKind::Cast(cast) => self.lower_cast(cast, block_id),
+            ast::ExprKind::Ident(ident) => self.lower_ident(ident, block_id, addr_taken),
+            ast::ExprKind::Int(int) => self.lower_int(int, block_id),
+            ast::ExprKind::BinaryOp(binary_op) => self.lower_binary_op(binary_op, block_id),
+            ast::ExprKind::PrefixOp(prefix_op) => self.lower_prefix_op(prefix_op, block_id),
+            ast::ExprKind::PostfixOp(postfix_op) => self.lower_postfix_op(postfix_op, block_id),
+            ast::ExprKind::Ternary(ternary) => self.lower_ternary(ternary, block_id),
+            ast::ExprKind::FunctionCall(function_call) => {
+                self.lower_function_call(function_call, block_id)
+            }
+            ast::ExprKind::ArrayIndex(array_index) => {
+                self.lower_array_index(array_index, block_id, addr_taken)
+            }
+            ast::ExprKind::SizeOfType(size_of_type) => {
+                self.lower_size_of_type(size_of_type, block_id)
+            }
+            ast::ExprKind::StructInit(struct_init) => self.lower_struct_init(struct_init, block_id),
+            ast::ExprKind::ArrayInit(array_init) => self.lower_array_init(array_init, block_id),
+            ast::ExprKind::MemberAccess(member_access) => {
+                self.lower_member_access(member_access, block_id, addr_taken)
+            }
+            ast::ExprKind::PointerMemberAccess(pointer_member_access) => {
+                self.lower_pointer_member_access(pointer_member_access, block_id, addr_taken)
+            }
+            ast::ExprKind::CopyProvenance(copy_prov) => self.lower_copy_prov(copy_prov, block_id),
+            ast::ExprKind::ExposeProvenance(expose_prov) => {
+                self.lower_expose_prov(expose_prov, block_id)
+            }
+            ast::ExprKind::UnexposeProvenance(unexpose_prov) => {
+                self.lower_unexpose_prov(unexpose_prov, block_id)
+            }
+            ast::ExprKind::NewProvenance(new_prov) => self.lower_new_prov(new_prov, block_id),
+            ast::ExprKind::Error => unreachable!(),
+        }
+    }
+    fn lower_nullptr(&mut self, nullptr: ast::Nullptr, block_id: BlockId) -> (ValueId, BlockId) {
+        let val_id = self.load_const(0, block_id, nullptr.span);
+
+        let typ = self.function.types.intern_deduplicated(Type::Ptr);
+        let (val_id, _, _, inst) =
+            self.new_inst1(Opcode::BitCast, block_id, nullptr.span, &[val_id], typ);
+        inst.extra = InstExtraData::ElementType(typ);
+        (val_id, block_id)
+    }
+    fn lower_cast(&mut self, cast: ast::Cast, block_id: BlockId) -> (ValueId, BlockId) {
+        let (val, block) = self.lower_expr(cast.expr, block_id, false);
+        let orig_typ_id = self.function.values.get_mut(val).typ;
+        let casted_to_id = self.ast_to_ir_type(cast.to_type.inner);
+        if orig_typ_id == casted_to_id {
+            return (val, block);
+        }
+        let (val_id, _, _, inst) =
+            self.new_inst1(Opcode::BitCast, block, cast.span, &[val], casted_to_id);
+        inst.extra = InstExtraData::ElementType(casted_to_id);
+        (val_id, block)
+    }
+    fn lower_ident(
+        &mut self,
+        ident: ast::Ident,
+        block_id: BlockId,
+        addr_taken: bool,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_int(&mut self, int: ast::Int, block_id: BlockId) -> (ValueId, BlockId) {
+        let val_id = self.load_const(int.lit, block_id, int.span);
+        (val_id, block_id)
+    }
+    fn lower_binary_op(&mut self, binop: ast::BinaryOp, block_id: BlockId) -> (ValueId, BlockId) {
+        let (lhs, block) = self.lower_expr(binop.left, block_id, false);
+        let (rhs, block) = self.lower_expr(binop.right, block, false);
+        let lhs_typ_id = self.function.values.get(lhs).typ;
+        let rhs_typ_id = self.function.values.get(rhs).typ;
+        let lhs_typ = *self.function.types.get(lhs_typ_id);
+        let rhs_typ = *self.function.types.get(rhs_typ_id);
+        // TODO: load/store reqs while lowering
+        match binop.kind {
+            ast::BinaryOpKind::Add => match (lhs_typ, rhs_typ) {
+                (Type::I64, Type::I64) => {
+                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let (val_id, _, _, _) =
+                        self.new_inst1(Opcode::Add, block, binop.span, &[lhs, rhs], typ);
+                    (val_id, block)
+                }
+                (Type::Ptr, Type::I64) | (Type::I64, Type::Ptr) => {
+                    let (side_expr_id, operands) = if lhs_typ == Type::Ptr {
+                        (binop.left, &[lhs, rhs])
+                    } else {
+                        (binop.right, &[rhs, lhs])
+                    };
+                    let typ = self.function.types.intern_deduplicated(Type::Ptr);
+                    let base = {
+                        let ptr_expr_nodeid = self.ctx.get_expr(side_expr_id).id;
+                        let ast_typ = self
+                            .type_table
+                            .get(&ptr_expr_nodeid)
+                            .expect("Should be added by type checker");
+                        let ast::Type::Ptr { pointee: base, .. } = self.ctx.get_type(ast_typ.id)
+                        else {
+                            unreachable!()
+                        };
+                        self.ast_to_ir_type(*base)
+                    };
+                    let (val_id, _, _, inst) =
+                        self.new_inst1(Opcode::IndexAddr, block, binop.span, operands, typ);
+                    inst.extra = InstExtraData::ElementType(base);
+                    (val_id, block)
+                }
+                _ => unreachable!(),
+            },
+            ast::BinaryOpKind::Sub => match (lhs_typ, rhs_typ) {
+                (Type::I64, Type::I64) => {
+                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let (val_id, _, _, _) =
+                        self.new_inst1(Opcode::Sub, block, binop.span, &[lhs, rhs], typ);
+                    (val_id, block)
+                }
+                (Type::Ptr, Type::I64) => {
+                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let (val_id, _, _, _) =
+                        self.new_inst1(Opcode::Neg, block, binop.span, &[rhs], typ);
+                    let typ = self.function.types.intern_deduplicated(Type::Ptr);
+                    let base = {
+                        let ptr_expr_nodeid = self.ctx.get_expr(binop.right).id;
+                        let ast_typ = self
+                            .type_table
+                            .get(&ptr_expr_nodeid)
+                            .expect("Should be added by type checker");
+                        let ast::Type::Ptr { pointee: base, .. } = self.ctx.get_type(ast_typ.id)
+                        else {
+                            unreachable!()
+                        };
+                        self.ast_to_ir_type(*base)
+                    };
+                    let (val_id, _, _, inst) =
+                        self.new_inst1(Opcode::IndexAddr, block, binop.span, &[lhs, val_id], typ);
+                    inst.extra = InstExtraData::ElementType(base);
+                    (val_id, block)
+                }
+                (Type::Ptr, Type::Ptr) => {
+                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let (lhs, _, _, _) =
+                        self.new_inst1(Opcode::BitCast, block, binop.span, &[lhs], typ);
+                    let (rhs, _, _, _) =
+                        self.new_inst1(Opcode::BitCast, block, binop.span, &[rhs], typ);
+                    let (raw_sub, _, _, _) =
+                        self.new_inst1(Opcode::Sub, block, binop.span, &[lhs, rhs], typ);
+                    let base_size = {
+                        let ptr_expr_nodeid = self.ctx.get_expr(binop.right).id;
+                        let ast_typ = self
+                            .type_table
+                            .get(&ptr_expr_nodeid)
+                            .expect("Should be added by type checker");
+                        let ast::Type::Ptr { pointee: base, .. } = self.ctx.get_type(ast_typ.id)
+                        else {
+                            unreachable!()
+                        };
+                        let base = self.ast_to_ir_type(*base);
+                        self.function.type_size(base)
+                    };
+                    let base_size = i64::try_from(base_size).expect("Internal compiler error");
+                    let base_size = self.load_const(base_size, block, binop.span);
+                    let (res, _, _, _) =
+                        self.new_inst1(Opcode::Div, block, binop.span, &[raw_sub, base_size], typ);
+                    (res, block)
+                }
+                _ => unreachable!(),
+            },
+
+            ast::BinaryOpKind::Mul
+            | ast::BinaryOpKind::Div
+            | ast::BinaryOpKind::Mod
+            | ast::BinaryOpKind::BitAnd
+            | ast::BinaryOpKind::BitOr
+            | ast::BinaryOpKind::Xor => todo!(),
+
+            ast::BinaryOpKind::MulAssign
+            | ast::BinaryOpKind::DivAssign
+            | ast::BinaryOpKind::BitAndAssign
+            | ast::BinaryOpKind::BitOrAssign
+            | ast::BinaryOpKind::XorAssign
+            | ast::BinaryOpKind::ModAssign => todo!(),
+
+            ast::BinaryOpKind::Greater
+            | ast::BinaryOpKind::Less
+            | ast::BinaryOpKind::GreaterOrEqual
+            | ast::BinaryOpKind::LessOrEqual => todo!(),
+
+            ast::BinaryOpKind::Eq => todo!(),
+            ast::BinaryOpKind::NotEq => todo!(),
+
+            ast::BinaryOpKind::And => todo!(),
+            ast::BinaryOpKind::Or => todo!(),
+
+            ast::BinaryOpKind::AddAssign => todo!(),
+            ast::BinaryOpKind::SubAssign => todo!(),
+
+            ast::BinaryOpKind::Assign => todo!(),
+
+            ast::BinaryOpKind::Shl => todo!(),
+            ast::BinaryOpKind::Shr => todo!(),
+
+            ast::BinaryOpKind::ShlAssign => todo!(),
+            ast::BinaryOpKind::ShrAssign => todo!(),
+        }
+    }
+    fn lower_prefix_op(
+        &mut self,
+        prefixop: ast::PrefixOp,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_postfix_op(
+        &mut self,
+        postfixop: ast::PostfixOp,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_ternary(&mut self, ternary: ast::Ternary, block_id: BlockId) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_function_call(
+        &mut self,
+        funccall: ast::FunctionCall,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_array_index(
+        &mut self,
+        arrayindex: ast::ArrayIndex,
+        block_id: BlockId,
+        addr_taken: bool,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_size_of_type(
+        &mut self,
+        size_of_type: ast::SizeOfType,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_struct_init(
+        &mut self,
+        struct_init: ast::StructInit,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_array_init(
+        &mut self,
+        array_init: ast::ArrayInit,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_member_access(
+        &mut self,
+        member_access: ast::MemberAccess,
+        block_id: BlockId,
+        addr_taken: bool,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
     fn lower_pointer_member_access(
         &mut self,
-        pointer_member_access: &ast::PointerMemberAccess,
+        pointer_member_access: ast::PointerMemberAccess,
         block_id: BlockId,
-    ) {
+        addr_taken: bool,
+    ) -> (ValueId, BlockId) {
+        todo!()
     }
-    fn lower_copy_prov(&mut self, copy_prov: &CopyProvenance, block_id: BlockId) {}
-    fn lower_expose_prov(&mut self, expose_prov: &ast::ExposeProvenance, block_id: BlockId) {}
-    fn lower_unexpose_prov(&mut self, unexpose_prov: &ast::UnexposeProvenance, block_id: BlockId) {}
-    fn lower_new_prov(&mut self, new_prov: &ast::NewProvenance, block_id: BlockId) {}
+    fn lower_copy_prov(
+        &mut self,
+        copy_prov: ast::CopyProvenance,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_expose_prov(
+        &mut self,
+        expose_prov: ast::ExposeProvenance,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_unexpose_prov(
+        &mut self,
+        unexpose_prov: ast::UnexposeProvenance,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
+    fn lower_new_prov(
+        &mut self,
+        new_prov: ast::NewProvenance,
+        block_id: BlockId,
+    ) -> (ValueId, BlockId) {
+        todo!()
+    }
 }
 
 impl<'a> FunctionLowerer<'a> {
+    fn new_inst1(
+        &mut self,
+        op: Opcode,
+        block: BlockId,
+        span: Span,
+        operands: &[ValueId],
+        val_typ: TypeId,
+    ) -> (ValueId, InstId, &mut Value, &mut Instruction) {
+        let inst = Instruction {
+            op,
+            block,
+            span,
+            operands: operands.iter().copied().collect(),
+            results: TinyVec::new(),
+            extra: InstExtraData::None,
+        };
+        let (inst_id, inst) = self.function.insts.intern_mut(inst);
+        let val = Value::new(val_typ, inst_id, 0, None);
+        let (val_id, val) = self.function.values.intern_mut(val);
+        inst.results.push(val_id);
+        self.function.blocks.get_mut(block).insts.push(inst_id);
+        (val_id, inst_id, val, inst)
+    }
+    fn new_inst0(
+        &mut self,
+        op: Opcode,
+        block: BlockId,
+        span: Span,
+        operands: &[ValueId],
+    ) -> (InstId, &mut Instruction) {
+        let inst = Instruction {
+            op,
+            block,
+            span,
+            operands: operands.iter().copied().collect(),
+            results: TinyVec::new(),
+            extra: InstExtraData::None,
+        };
+        let (inst_id, inst) = self.function.insts.intern_mut(inst);
+        self.function.blocks.get_mut(block).insts.push(inst_id);
+        (inst_id, inst)
+    }
+    fn load_const(&mut self, int: i64, block: BlockId, span: Span) -> ValueId {
+        let typ = self.function.types.intern_deduplicated(Type::I64);
+        let (val_id, _, _, inst) = self.new_inst1(Opcode::LoadConst, block, span, &[], typ);
+        inst.extra = InstExtraData::ConstInt(int);
+        val_id
+    }
+    fn connect(&mut self, from_id: BlockId, to_id: BlockId) {
+        let from = self.function.blocks.get_mut(from_id);
+        from.add_succ(to_id);
+        let to = self.function.blocks.get_mut(to_id);
+        to.add_pred(from_id);
+    }
+    fn new_block(&mut self, dbg_name: Symbol) -> BlockId {
+        let block = Block::new(dbg_name);
+        self.function.blocks.intern(block)
+    }
     fn ast_to_ir_type(&mut self, typ: crate::syntax::context::TypeId) -> TypeId {
         ast_to_ir_type(
             typ,
@@ -177,15 +851,14 @@ impl<'a> FunctionLowerer<'a> {
             &mut self.function.structs,
         )
     }
-    fn get_var_type(&mut self, var: Ident) -> TypeId {
-        let info = self.type_table[&var.id];
-        ast_to_ir_type(
-            info.id,
-            self.symbol_table,
-            self.ctx,
-            &mut self.function.types,
-            &mut self.function.structs,
-        )
+    fn get_var_type(&mut self, var: VarId) -> TypeId {
+        match var {
+            VarId::Mem => self.function.types.intern_deduplicated(Type::Memory),
+            VarId::Id(var_id) => {
+                let var = self.prepass.vars.get(var_id);
+                self.ast_to_ir_type(var.typ)
+            }
+        }
     }
     fn block_sealed(&mut self, block: BlockId) -> bool {
         let block = block.get() as usize;
@@ -194,16 +867,16 @@ impl<'a> FunctionLowerer<'a> {
         }
         self.sealed_blocks[block]
     }
-    fn write_variable(&mut self, var: Symbol, block: BlockId, value: ValueId) {
+    fn write_variable(&mut self, var: VarId, block: BlockId, value: ValueId) {
         self.current_def[block.get() as usize].insert(var, value);
     }
-    fn read_variable(&mut self, var: Ident, block: BlockId) -> ValueId {
-        if let Some(val) = self.current_def[block.get() as usize].get(&var.sym) {
+    fn read_variable(&mut self, var: VarId, block: BlockId) -> ValueId {
+        if let Some(val) = self.current_def[block.get() as usize].get(&var) {
             return self.resolve_alias(*val);
         }
         self.read_variable_recursive(var, block)
     }
-    fn read_variable_recursive(&mut self, var: Ident, block_id: BlockId) -> ValueId {
+    fn read_variable_recursive(&mut self, var: VarId, block_id: BlockId) -> ValueId {
         let val = if !self.block_sealed(block_id) {
             let typ = self.get_var_type(var);
             let val = self.function.new_phi(block_id, typ);
@@ -216,13 +889,13 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             let typ = self.get_var_type(var);
             let val = self.function.new_phi(block_id, typ);
-            self.write_variable(var.sym, block_id, val);
+            self.write_variable(var, block_id, val);
             self.add_phi_operands(var, block_id, val)
         };
-        self.write_variable(var.sym, block_id, val);
+        self.write_variable(var, block_id, val);
         val
     }
-    fn add_phi_operands(&mut self, var: Ident, block_id: BlockId, phi_id: ValueId) -> ValueId {
+    fn add_phi_operands(&mut self, var: VarId, block_id: BlockId, phi_id: ValueId) -> ValueId {
         let block = self.function.blocks.get(block_id);
         let preds = block.preds.clone();
         for pred in preds {
@@ -325,6 +998,7 @@ impl Function {
         let val = Value::new(typ, inst_id, 0, None);
         let val_id = self.values.intern(val);
         inst.results.push(val_id);
+        self.blocks.get_mut(block_id).insts.push(inst_id);
         val_id
     }
     fn replace_value(&mut self, from: ValueId, to: ValueId) {
@@ -415,5 +1089,32 @@ fn layout_of_ast_type(
             (e_size * *len as u64, e_align)
         }
         ast::Type::FuncPtr { .. } => (8, 8),
+    }
+}
+
+fn binop_kind_to_opcode(kind: ast::BinaryOpKind) -> Opcode {
+    match kind {
+        ast::BinaryOpKind::Mul => Opcode::Mul,
+        ast::BinaryOpKind::Div => Opcode::Div,
+        ast::BinaryOpKind::Mod => Opcode::Mod,
+        ast::BinaryOpKind::BitAnd => Opcode::BitAnd,
+        ast::BinaryOpKind::BitOr => Opcode::BitOr,
+        ast::BinaryOpKind::Xor => Opcode::Xor,
+
+        ast::BinaryOpKind::MulAssign => Opcode::Mul,
+        ast::BinaryOpKind::DivAssign => Opcode::Div,
+        ast::BinaryOpKind::BitAndAssign => Opcode::BitAnd,
+        ast::BinaryOpKind::BitOrAssign => Opcode::BitOr,
+        ast::BinaryOpKind::XorAssign => Opcode::Xor,
+        ast::BinaryOpKind::ModAssign => Opcode::Mod,
+
+        ast::BinaryOpKind::Greater => Opcode::Greater,
+        ast::BinaryOpKind::Less => Opcode::Less,
+        ast::BinaryOpKind::GreaterOrEqual => Opcode::GreaterOrEqual,
+        ast::BinaryOpKind::LessOrEqual => Opcode::LessOrEqual,
+
+        ast::BinaryOpKind::NotEq => Opcode::NotEq,
+        ast::BinaryOpKind::Eq => Opcode::Eq,
+        _ => unreachable!(),
     }
 }

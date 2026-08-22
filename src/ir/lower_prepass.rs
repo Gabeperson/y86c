@@ -11,11 +11,12 @@ define_arena!(Var, VarId, VarArena);
 #[derive(Debug, Clone)]
 pub struct Var {
     pub address_taken: bool,
+    pub typ: TypeId,
 }
 
 impl Var {
-    fn new(address_taken: bool) -> Self {
-        Self { address_taken }
+    fn new(address_taken: bool, typ: TypeId) -> Self {
+        Self { address_taken, typ }
     }
 }
 
@@ -47,8 +48,8 @@ impl LoweringPrepass<'_> {
             vars: prepass.vars,
         }
     }
-    fn declare_var(&mut self, sym: Symbol, nodeid: NodeId, addr_taken: bool) {
-        let var = Var::new(addr_taken);
+    fn declare_var(&mut self, sym: Symbol, nodeid: NodeId, addr_taken: bool, typ: TypeId) {
+        let var = Var::new(addr_taken, typ);
         let id = self.vars.intern(var);
         self.scoped.insert(sym, id);
         self.id_map.insert(nodeid, id);
@@ -66,8 +67,8 @@ impl LoweringPrepass<'_> {
         for decl in &program.decls {
             if let GlobalDeclarationKind::Function(func) = &decl.kind {
                 self.scoped.enter_scope();
-                for (name, _typ) in func.params.iter().copied() {
-                    self.declare_var(name.sym, name.id, false);
+                for (name, typ) in func.params.iter().copied() {
+                    self.declare_var(name.sym, name.id, false, typ.inner);
                 }
                 self.visit_block(&func.body, false);
                 self.scoped.exit_scope();
@@ -141,6 +142,7 @@ impl LoweringPrepass<'_> {
                     variable_declaration.name.sym,
                     variable_declaration.name.id,
                     false,
+                    variable_declaration.var_type.inner,
                 );
             }
             StmtKind::Expr(expr_id) => self.visit_expr(*expr_id, false),

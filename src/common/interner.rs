@@ -108,6 +108,12 @@ impl<T> Interner<T> {
             item,
         )
     }
+    pub fn len(&self) -> usize {
+        self.arr.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.arr.is_empty()
+    }
     pub fn get(&self, id: Id<T>) -> &T {
         if id.index.get() == u32::MAX {
             panic!("Internal compiler error");
@@ -185,6 +191,12 @@ macro_rules! define_id {
             }
             pub fn get_mut(&mut self, id: $id) -> &mut $typ {
                 self.0.get_mut(id.0)
+            }
+            pub fn len(&self) -> usize {
+                self.0.len()
+            }
+            pub fn is_empty(&self) -> bool {
+                self.0.is_empty()
             }
             pub fn intern(&mut self, item: $typ) -> $id {
                 $id(self.0.intern(item))

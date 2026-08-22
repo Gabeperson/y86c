@@ -598,7 +598,7 @@ impl CtxEq for StmtKind {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Assert {
     pub condition: ExprId,
     pub span: Span,
@@ -611,7 +611,7 @@ impl CtxEq for Assert {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Break {
     pub span: Span,
     pub id: NodeId,
@@ -623,7 +623,7 @@ impl CtxEq for Break {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Continue {
     pub span: Span,
     pub id: NodeId,
@@ -648,7 +648,7 @@ impl CtxEq for Block {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct IfStmt {
     pub condition: ExprId,
     pub then_branch: StmtId,
@@ -665,7 +665,7 @@ impl CtxEq for IfStmt {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct WhileLoop {
     pub condition: ExprId,
     pub body: StmtId,
@@ -679,7 +679,7 @@ impl CtxEq for WhileLoop {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ForLoop {
     pub init: Option<StmtId>,
     pub condition: Option<ExprId>,
@@ -698,7 +698,7 @@ impl CtxEq for ForLoop {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct ReturnStmt {
     pub value: Option<ExprId>,
     pub span: Span,
@@ -711,7 +711,7 @@ impl CtxEq for ReturnStmt {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct VariableDeclaration {
     pub var_type: TypeNode,
     pub name: Ident,

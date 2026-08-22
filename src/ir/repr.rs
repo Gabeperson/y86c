@@ -13,11 +13,6 @@ pub mod arenas {
     define_arena!(Provenance, ProvenanceId, ProvenanceArena; dedup);
     define_arena!(StructInfo, StructId, StructArena; dedup);
     define_arena!(Type, TypeId, TypeArena; dedup);
-    impl InstId {
-        fn invalid() -> Self {
-            Self::default()
-        }
-    }
 }
 pub use arenas::*;
 
@@ -30,6 +25,18 @@ pub enum Type {
     Memory,
     Struct(StructId),
     Array { element: TypeId, len: u64 },
+}
+
+impl Type {
+    pub fn is_struct(&self) -> bool {
+        matches!(self, Type::Struct(_))
+    }
+    pub fn is_array(&self) -> bool {
+        matches!(self, Type::Array { .. })
+    }
+    pub fn is_ptr(&self) -> bool {
+        matches!(self, Type::Ptr)
+    }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
@@ -60,11 +67,6 @@ pub enum Provenance {
     Exposed,
 }
 
-#[derive(Clone, Debug)]
-pub struct BranchTarget {
-    pub target: BlockId,
-}
-
 #[derive(Clone, Debug, Default)]
 pub struct PhiOperand {
     pub block: BlockId,
@@ -78,6 +80,28 @@ pub struct Block {
     pub succs: TinyVec<[BlockId; 4]>,
     pub dbg_name: Option<Symbol>,
 }
+
+impl Block {
+    pub fn new(sym: Symbol) -> Self {
+        Self {
+            insts: Vec::new(),
+            preds: TinyVec::new(),
+            succs: TinyVec::new(),
+            dbg_name: Some(sym),
+        }
+    }
+    pub fn add_pred(&mut self, pred: BlockId) {
+        if !self.preds.contains(&pred) {
+            self.preds.push(pred)
+        }
+    }
+    pub fn add_succ(&mut self, succ: BlockId) {
+        if !self.succs.contains(&succ) {
+            self.succs.push(succ)
+        }
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct StackSlot {
     pub size: u64,
@@ -151,11 +175,11 @@ pub enum InstExtraData {
         align: u64,
     },
     Branch {
-        then_target: BranchTarget,
-        else_target: BranchTarget,
+        then_target: BlockId,
+        else_target: BlockId,
     },
     Jump {
-        target: BranchTarget,
+        target: BlockId,
     },
     Phi {
         operands: TinyVec<[PhiOperand; 4]>,
@@ -171,14 +195,14 @@ impl InstExtraData {
             None
         }
     }
-    pub fn as_jmp_target(&mut self) -> Option<&mut BranchTarget> {
+    pub fn as_jmp_target(&mut self) -> Option<&mut BlockId> {
         if let InstExtraData::Jump { target } = self {
             Some(target)
         } else {
             None
         }
     }
-    pub fn as_branch_targets(&mut self) -> Option<(&mut BranchTarget, &mut BranchTarget)> {
+    pub fn as_branch_targets(&mut self) -> Option<(&mut BlockId, &mut BlockId)> {
         if let InstExtraData::Branch {
             then_target,
             else_target,
@@ -201,6 +225,38 @@ pub struct Instruction {
     pub extra: InstExtraData,
 }
 
+impl Instruction {
+    pub fn new_jmp(block: BlockId, span: Span, jmp_target: BlockId) -> Self {
+        Instruction {
+            op: Opcode::Jmp,
+            block,
+            span,
+            operands: TinyVec::new(),
+            results: TinyVec::new(),
+            extra: InstExtraData::Jump { target: jmp_target },
+        }
+    }
+    pub fn new_branch(
+        block: BlockId,
+        span: Span,
+        cond: ValueId,
+        true_target: BlockId,
+        false_target: BlockId,
+    ) -> Self {
+        Instruction {
+            op: Opcode::Jmp,
+            block,
+            span,
+            operands: tiny_vec![{ cond }],
+            results: TinyVec::new(),
+            extra: InstExtraData::Branch {
+                then_target: true_target,
+                else_target: false_target,
+            },
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
     GetStackAddr,
@@ -210,6 +266,7 @@ pub enum Opcode {
     InsertValue,
     MakeStruct,
 
+    Assert,
     Param,
     Phi,
     Jmp,
@@ -228,7 +285,6 @@ pub enum Opcode {
     LoadGlobalLoc,
     Nop,
     BitCast,
-    PtrAdd,
     Select,
 
     Add,
@@ -291,4 +347,22 @@ pub struct Function {
     pub value_provenances: AHashMap<ValueId, ProvenanceId>,
     pub structs: StructArena,
     pub types: TypeArena,
+}
+
+impl Function {
+    pub fn type_size(&self, type_id: TypeId) -> u64 {
+        let typ = self.types.get(type_id);
+        match typ {
+            Type::I64 => 8,
+            Type::Ptr => 8,
+            Type::FnPtr => 8,
+            Type::Void => 1,
+            Type::Memory => unreachable!(),
+            Type::Struct(struct_id) => {
+                let struct_info = self.structs.get(*struct_id);
+                struct_info.size
+            }
+            Type::Array { element, len } => self.type_size(*element) * *len,
+        }
+    }
 }
