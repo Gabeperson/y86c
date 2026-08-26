@@ -67,8 +67,10 @@ impl LoweringPrepass<'_> {
         for decl in &program.decls {
             if let GlobalDeclarationKind::Function(func) = &decl.kind {
                 self.scoped.enter_scope();
-                for (name, typ) in func.params.iter().copied() {
-                    self.declare_var(name.sym, name.id, false, typ.inner);
+                for (name, typnode) in func.params.iter().copied() {
+                    let typ = self.ctx.get_type(typnode.inner);
+                    let addr_taken = typ.is_array() | typ.is_struct();
+                    self.declare_var(name.sym, name.id, addr_taken, typnode.inner);
                 }
                 self.visit_block(&func.body, false);
                 self.scoped.exit_scope();

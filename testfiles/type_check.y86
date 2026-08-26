@@ -284,6 +284,11 @@ fn v_memberaccess(s: BigStruct) {
     let b: *int = s.b;
     let c: *int = s.c;
 }
+
+fn v_memberaccess() {
+    let a: int = Struct {x: 10}.x;
+}
+
 fn v_memberaccess() {
     let a: int = bs.a;
     let b: *int = bs.b;

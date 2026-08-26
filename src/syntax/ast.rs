@@ -358,7 +358,7 @@ pub enum BinaryOpKind {
 }
 
 impl BinaryOpKind {
-    pub fn needs_assignable(&self) -> bool {
+    pub fn is_assign(&self) -> bool {
         matches!(
             self,
             BinaryOpKind::AddAssign

@@ -39,6 +39,7 @@ impl Layout {
 #[derive(Debug, Clone)]
 pub struct StructInfo {
     pub fields: IndexMap<Symbol, FieldInfo, RandomState>,
+    pub order: AHashMap<Symbol, usize>,
     pub layout: Layout,
     pub span: Span,
 }
@@ -186,7 +187,8 @@ impl<'a> SymbolTableBuilder<'a> {
         let mut size: usize = 0;
         let mut align = 1;
         let mut map = IndexMap::<Symbol, FieldInfo, RandomState>::with_hasher(RandomState::new());
-        for (name, typ) in &decl.fields {
+        let mut order = AHashMap::new();
+        for (i, (name, typ)) in decl.fields.iter().enumerate() {
             self.resolving.insert(
                 struct_name,
                 StructResolvingRequirement {
@@ -210,6 +212,7 @@ impl<'a> SymbolTableBuilder<'a> {
             map.insert(name.sym, info);
             size += layout.size;
             align = usize::max(align, layout.align);
+            order.insert(name.sym, i);
         }
         size = size.next_multiple_of(align);
         let layout = Layout::new(size, align);
@@ -219,6 +222,7 @@ impl<'a> SymbolTableBuilder<'a> {
                 fields: map,
                 layout,
                 span: decl.span,
+                order,
             },
         );
         Ok(layout)
@@ -230,6 +234,7 @@ impl<'a> SymbolTableBuilder<'a> {
                 fields: IndexMap::with_hasher(RandomState::new()),
                 layout: Layout::new(1, 1),
                 span,
+                order: AHashMap::new(),
             },
         );
     }

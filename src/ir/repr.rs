@@ -59,12 +59,12 @@ pub struct FunctionArg(pub ValueId);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Provenance {
     StackSlot(StackSlotId),
+    NoaliasPtr(ValueId),
     NewProv(NewProvInst),
     TransparentReturn(ValueId),
     OpaqueReturn(OpaqueFnReturn),
-    FunctionArg(FunctionArg),
     Global(Symbol),
-    Exposed,
+    Wildcard,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -114,9 +114,10 @@ pub struct StackSlot {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum StackSlotKind {
     AddressTakenLocal,
-    Array,
+    Aggregate,
     FnArgument { typ: TypeId },
     Spill,
+    IntermediateAggregate,
 }
 
 #[derive(Debug, Clone)]
@@ -155,32 +156,39 @@ impl Value {
 
 #[derive(Debug, Clone)]
 pub enum InstExtraData {
+    // LoadConst
     ConstInt(i64),
+    // GetStackAddr
     StackSlot(StackSlotId),
+    // LoadGlobalLoc
     Global(Symbol),
+    // Call
     Function(Symbol),
     ElementType(TypeId),
+    // IndexAddr
+    IndexAddrData {
+        typ: TypeId,
+        forward: bool,
+    },
+    // Param
     ParamIndex {
         index: u32,
     },
-    Struct {
-        sym: Symbol,
-    },
+    // FieldAddr
     StructField {
         struct_sym: Symbol,
         field: u32,
     },
-    ElementInfo {
-        size: u64,
-        align: u64,
-    },
+    // Branch
     Branch {
         then_target: BlockId,
         else_target: BlockId,
     },
+    // Jmp
     Jump {
         target: BlockId,
     },
+    // Phi
     Phi {
         operands: TinyVec<[PhiOperand; 4]>,
     },
@@ -225,46 +233,11 @@ pub struct Instruction {
     pub extra: InstExtraData,
 }
 
-impl Instruction {
-    pub fn new_jmp(block: BlockId, span: Span, jmp_target: BlockId) -> Self {
-        Instruction {
-            op: Opcode::Jmp,
-            block,
-            span,
-            operands: TinyVec::new(),
-            results: TinyVec::new(),
-            extra: InstExtraData::Jump { target: jmp_target },
-        }
-    }
-    pub fn new_branch(
-        block: BlockId,
-        span: Span,
-        cond: ValueId,
-        true_target: BlockId,
-        false_target: BlockId,
-    ) -> Self {
-        Instruction {
-            op: Opcode::Jmp,
-            block,
-            span,
-            operands: tiny_vec![{ cond }],
-            results: TinyVec::new(),
-            extra: InstExtraData::Branch {
-                then_target: true_target,
-                else_target: false_target,
-            },
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum Opcode {
     GetStackAddr,
     FieldAddr,
     IndexAddr,
-    ExtractValue,
-    InsertValue,
-    MakeStruct,
 
     Assert,
     Param,
@@ -281,7 +254,7 @@ pub enum Opcode {
     ExposeProvenance,
     UnexposeProvenance,
     NewProvenance,
-    ArrayCopy,
+    Memcpy,
     LoadGlobalLoc,
     Nop,
     BitCast,
@@ -363,6 +336,21 @@ impl Function {
                 struct_info.size
             }
             Type::Array { element, len } => self.type_size(*element) * *len,
+        }
+    }
+    pub fn type_align(&self, type_id: TypeId) -> u64 {
+        let typ = self.types.get(type_id);
+        match typ {
+            Type::I64 => 8,
+            Type::Ptr => 8,
+            Type::FnPtr => 8,
+            Type::Void => 1,
+            Type::Memory => unreachable!(),
+            Type::Struct(struct_id) => {
+                let struct_info = self.structs.get(*struct_id);
+                struct_info.align
+            }
+            Type::Array { element, .. } => self.type_align(*element),
         }
     }
 }

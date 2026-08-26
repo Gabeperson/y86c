@@ -997,7 +997,7 @@ impl<'a> TypeChecker<'a> {
             | BinaryOpKind::BitOrAssign
             | BinaryOpKind::XorAssign
             | BinaryOpKind::ModAssign => {
-                if binop.kind.needs_assignable() && !lhs_info.assignable {
+                if binop.kind.is_assign() && !lhs_info.assignable {
                     self.errors
                         .push(TypeCheckError::LhsNotAssignable { span, op });
                 }
