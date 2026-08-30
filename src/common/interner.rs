@@ -154,8 +154,14 @@ macro_rules! define_id {
         }
     };
     ($typ:ident, $id:ident, $arena:ident) => {
-        #[derive(Debug, Clone, Copy, Default)]
+        #[derive(Clone, Copy, Default)]
         pub struct $id($crate::common::interner::Id<$typ>);
+
+        impl std::fmt::Debug for $id {
+            fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "{}({})", stringify!($id), self.get())
+            }
+        }
 
         impl std::hash::Hash for $id {
             fn hash<H: std::hash::Hasher>(&self, state: &mut H) {

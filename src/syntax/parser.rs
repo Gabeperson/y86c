@@ -202,7 +202,7 @@ impl<'t> Parser<'t> {
         }
         let close_curly = self.expect(
             TokenKind::RCurly,
-            "Expected ')' at end of struct initialization",
+            "Expected '}' at end of struct initialization",
         )?;
         let span = Span::new(ident.span.start, close_curly.span.end);
         let id = self.next_id();

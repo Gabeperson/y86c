@@ -14,7 +14,7 @@ pub use arenas::*;
 
 #[derive(Debug)]
 pub struct Context {
-    symbol_interner: SymbolArena,
+    pub symbol_interner: SymbolArena,
     type_interner: TypeArena,
     expr_interner: ExprArena,
     stmt_interner: StmtArena,

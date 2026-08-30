@@ -1,44 +1,70 @@
 use ahash::AHashMap;
 
 use crate::{
-    analysis::scoped_hashmap::ScopedHashMap,
+    analysis::{scoped_hashmap::ScopedHashMap, symbol_table::SymbolTable},
     common::{interner::define_arena, symbol::Symbol},
     syntax::{ast::*, context::*},
 };
 
 define_arena!(Var, VarId, VarArena);
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 pub struct Var {
     pub address_taken: bool,
     pub typ: TypeId,
+    pub is_global: bool,
+    pub is_function: bool,
 }
 
 impl Var {
-    fn new(address_taken: bool, typ: TypeId) -> Self {
-        Self { address_taken, typ }
+    fn new(address_taken: bool, typ: TypeId, is_global: bool, is_function: bool) -> Self {
+        Self {
+            address_taken,
+            typ,
+            is_global,
+            is_function,
+        }
     }
 }
 
 #[derive(Debug, Clone)]
 pub struct LoweringPrepassOutput {
-    pub id_map: AHashMap<NodeId, VarId>,
+    id_map: AHashMap<NodeId, VarId>,
     pub vars: VarArena,
+}
+
+impl LoweringPrepassOutput {
+    #[track_caller]
+    pub fn get_node_varid(&self, nodeid: NodeId) -> VarId {
+        *self
+            .id_map
+            .get(&nodeid)
+            .expect("Should be inserted in prepass")
+    }
+    pub fn get_var(&self, varid: VarId) -> Var {
+        *self.vars.get(varid)
+    }
 }
 
 #[derive(Debug, Clone)]
 pub struct LoweringPrepass<'a> {
     scoped: ScopedHashMap<Symbol, VarId>,
+    symbol_table: &'a SymbolTable,
     vars: VarArena,
     id_map: AHashMap<NodeId, VarId>,
     ctx: &'a Context,
 }
 
 impl LoweringPrepass<'_> {
-    pub fn run(program: &Program, ctx: &Context) -> LoweringPrepassOutput {
+    pub fn run(
+        program: &Program,
+        ctx: &Context,
+        symbol_table: &SymbolTable,
+    ) -> LoweringPrepassOutput {
         let mut prepass = LoweringPrepass {
             scoped: ScopedHashMap::new(),
             vars: VarArena::new(),
+            symbol_table,
             id_map: AHashMap::new(),
             ctx,
         };
@@ -48,29 +74,69 @@ impl LoweringPrepass<'_> {
             vars: prepass.vars,
         }
     }
-    fn declare_var(&mut self, sym: Symbol, nodeid: NodeId, addr_taken: bool, typ: TypeId) {
-        let var = Var::new(addr_taken, typ);
+    fn declare_var(
+        &mut self,
+        sym: Symbol,
+        nodeid: NodeId,
+        addr_taken: bool,
+        typ: TypeId,
+        is_global: bool,
+        is_function: bool,
+    ) {
+        let var = Var::new(addr_taken, typ, is_global, is_function);
         let id = self.vars.intern(var);
         self.scoped.insert(sym, id);
         self.id_map.insert(nodeid, id);
     }
-    fn var_ref_taken(&mut self, sym: Symbol, nodeid: NodeId) {
+    fn var_ref_taken(&mut self, sym: Symbol, nodeid: NodeId, ref_taken: bool) {
         let Some(id) = self.scoped.get(sym) else {
-            // If this path is taken it means the symbol above refers to a global variable.
-            return;
+            unreachable!()
         };
         let var = self.vars.get_mut(id);
-        var.address_taken = true;
+        if ref_taken {
+            var.address_taken = true;
+        }
         self.id_map.insert(nodeid, id);
     }
     fn run_inner(&mut self, program: &Program) {
+        for decl in &program.decls {
+            match &decl.kind {
+                GlobalDeclarationKind::Variable(variable_declaration) => {
+                    self.declare_var(
+                        variable_declaration.name.sym,
+                        variable_declaration.name.id,
+                        true,
+                        variable_declaration.var_type.inner,
+                        true,
+                        false,
+                    );
+                }
+                GlobalDeclarationKind::Function(function_declaration) => {
+                    let entry = self
+                        .symbol_table
+                        .vars
+                        .get(&function_declaration.name.sym)
+                        .unwrap();
+                    assert!(entry.is_function);
+                    self.declare_var(
+                        function_declaration.name.sym,
+                        function_declaration.name.id,
+                        true,
+                        entry.typ,
+                        true,
+                        true,
+                    );
+                }
+                _ => {}
+            }
+        }
         for decl in &program.decls {
             if let GlobalDeclarationKind::Function(func) = &decl.kind {
                 self.scoped.enter_scope();
                 for (name, typnode) in func.params.iter().copied() {
                     let typ = self.ctx.get_type(typnode.inner);
                     let addr_taken = typ.is_array() | typ.is_struct();
-                    self.declare_var(name.sym, name.id, addr_taken, typnode.inner);
+                    self.declare_var(name.sym, name.id, addr_taken, typnode.inner, false, false);
                 }
                 self.visit_block(&func.body, false);
                 self.scoped.exit_scope();
@@ -140,11 +206,15 @@ impl LoweringPrepass<'_> {
                 if let Some(expr) = variable_declaration.init_value {
                     self.visit_expr(expr, false);
                 }
+                let typ = self.ctx.get_type(variable_declaration.var_type.inner);
+                let addr_taken = typ.is_array() || typ.is_struct();
                 self.declare_var(
                     variable_declaration.name.sym,
                     variable_declaration.name.id,
-                    false,
+                    addr_taken,
                     variable_declaration.var_type.inner,
+                    false,
+                    false,
                 );
             }
             StmtKind::Expr(expr_id) => self.visit_expr(*expr_id, false),
@@ -162,9 +232,7 @@ impl LoweringPrepass<'_> {
                 self.visit_expr(cast.expr, false);
             }
             ExprKind::Ident(ident) => {
-                if addr_taken {
-                    self.var_ref_taken(ident.sym, ident.id);
-                }
+                self.var_ref_taken(ident.sym, ident.id, addr_taken);
             }
             ExprKind::BinaryOp(binary_op) => {
                 self.visit_expr(binary_op.left, false);

@@ -90,8 +90,8 @@ pub struct SymbolTableBuilder<'a> {
 }
 
 impl<'a> SymbolTableBuilder<'a> {
-    pub fn build(program: &'a Program, type_arena: &'a mut Context) -> SymbolTableBuildOutput {
-        let mut builder = Self::new(type_arena);
+    pub fn build(program: &'a Program, ctx: &'a mut Context) -> SymbolTableBuildOutput {
+        let mut builder = Self::new(ctx);
         builder.build_inner(program);
         SymbolTableBuildOutput {
             symbol_table: builder.symbol_table,

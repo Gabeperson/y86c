@@ -1186,7 +1186,7 @@ impl<'a> TypeChecker<'a> {
                     && let typ = self.ctx.get_type(*pointee)
                     && !matches!(typ, Type::Void)
                 {
-                    let expr_type_info = ExprTypeInfo::new(*pointee, false);
+                    let expr_type_info = ExprTypeInfo::new(*pointee, true);
                     self.type_table.insert(op.id, expr_type_info);
                     return Some(expr_type_info);
                 } else {

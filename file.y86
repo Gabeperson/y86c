@@ -1,0 +1,8 @@
+struct Something {
+    x: int,   
+}
+fn main() {
+    let x: Something;
+    let y: Something;
+    x = y;
+}

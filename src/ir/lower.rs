@@ -1,7 +1,7 @@
-use std::ops::{AddAssign, ControlFlow};
+use std::ops::ControlFlow;
 
 use ahash::AHashMap;
-use tinyvec::{TinyVec, tiny_vec};
+use tinyvec::TinyVec;
 
 use crate::analysis::symbol_table::SymbolTable;
 use crate::analysis::type_checker::ExprTypeInfo;
@@ -9,39 +9,116 @@ use crate::common::span::Span;
 use crate::common::symbol::Symbol;
 use crate::ir::lower_prepass::{self as prepass, LoweringPrepassOutput};
 use crate::ir::repr::*;
-use crate::syntax::ast::{self, NodeId, Program};
+use crate::syntax::ast::{self, NodeId};
 
 use crate::syntax::context::{Context, ExprId, StmtId};
 
 #[derive(Debug)]
+pub enum LoweringError {
+    ReadUninitialized(Span),
+}
+
+#[derive(Debug)]
 pub struct Lowerer<'a> {
-    prepass: &'a LoweringPrepassOutput,
+    prepass: &'a mut LoweringPrepassOutput,
     functions: Vec<Function>,
     symbol_table: &'a SymbolTable,
     ctx: &'a mut Context,
     type_table: &'a AHashMap<NodeId, ExprTypeInfo>,
+    typectx: TypeContext,
+    struct_mapping: AHashMap<Symbol, StructId>,
+    errors: Vec<LoweringError>,
 
-    curr_fn: usize,
-
-    current_def: Vec<AHashMap<Symbol, ValueId>>,
-    incomplete_args: Vec<AHashMap<Symbol, ValueId>>,
+    current_def: Vec<AHashMap<VarId, ValueId>>,
+    incomplete_phis: Vec<AHashMap<VarId, ValueId>>,
     sealed_blocks: Vec<bool>,
     aliases: AHashMap<ValueId, ValueId>,
 }
 
 impl<'a> Lowerer<'a> {
-    pub fn lower(&mut self, program: &Program) {}
-    fn lower_function(&mut self, decl: &ast::FunctionDeclaration) {}
+    pub fn new(
+        prepass: &'a mut LoweringPrepassOutput,
+        symbol_table: &'a SymbolTable,
+        ctx: &'a mut Context,
+        type_table: &'a AHashMap<NodeId, ExprTypeInfo>,
+    ) -> Self {
+        Self {
+            prepass,
+            functions: Vec::new(),
+            symbol_table,
+            ctx,
+            type_table,
+            errors: Vec::new(),
+            struct_mapping: AHashMap::new(),
+            typectx: TypeContext::new(),
+            current_def: Vec::new(),
+            incomplete_phis: Vec::new(),
+            sealed_blocks: Vec::new(),
+            aliases: AHashMap::new(),
+        }
+    }
+    pub fn lower(
+        mut self,
+        program: &ast::Program,
+    ) -> (TypeContext, Vec<Function>, Vec<LoweringError>) {
+        for decl in &program.decls {
+            if let ast::GlobalDeclarationKind::Function(func) = &decl.kind {
+                self.lower_function(func);
+            }
+        }
+        (self.typectx, self.functions, self.errors)
+    }
+    fn lower_function(&mut self, decl: &ast::FunctionDeclaration) {
+        let mut function = Function {
+            name: decl.name.sym,
+            sig: FunctionSignature {
+                params: TinyVec::new(),
+                ret: TypeId::default(),
+            },
+            // Will be replaced with a valid one
+            entry: BlockId::default(),
+            span: decl.span,
+            inline: decl.inline,
+            cc: decl.calling_convention,
+            blocks: BlockArena::new(),
+            stack_slots: StackSlotArena::new(),
+            insts: InstArena::new(),
+            values: ValueArena::new(),
+            provenances: ProvenanceArena::new(),
+            value_provenances: AHashMap::new(),
+        };
+        self.current_def.clear();
+        self.incomplete_phis.clear();
+        self.sealed_blocks.clear();
+        self.aliases.clear();
+        let mut lowerer = FunctionLowerer {
+            prepass: self.prepass,
+            symbol_table: self.symbol_table,
+            ctx: self.ctx,
+            type_table: self.type_table,
+            function: &mut function,
+            sret: ValueId::default(),
+            errors: &mut self.errors,
+            struct_mapping: &mut self.struct_mapping,
+            typectx: &mut self.typectx,
+            current_def: &mut self.current_def,
+            incomplete_phis: &mut self.incomplete_phis,
+            sealed_blocks: &mut self.sealed_blocks,
+            aliases: &mut self.aliases,
+        };
+        lowerer.lower(decl);
+        self.functions.push(function);
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
-pub struct LoopBlocks {
+struct LoopBlocks {
     cont: BlockId,
     brk: BlockId,
 }
 
 #[derive(Debug, Clone, Copy)]
-pub enum Place {
+enum Place {
     // "temporary" ssa var (not identifiers mainly/only?)
     SsaVar {
         val: ValueId,
@@ -57,6 +134,16 @@ pub enum Place {
         span: Span,
         base_typ: TypeId,
     },
+    // Location that is writable to, but isn't initialized, so is not readable.
+    UndefinedSsa {
+        prepass_varid: prepass::VarId,
+        span: Span,
+    },
+    // void-returning exprs
+    // currently only function calls that call -> void functions.
+    // These are not readable NOR writable to, just there for
+    // "error checking" in traversal basically
+    None,
 }
 
 impl Place {
@@ -74,6 +161,12 @@ impl Place {
                     lowerer.new_inst1(Opcode::Load, block, span, &[val, mem], base_typ);
                 val_id
             }
+            Place::UndefinedSsa { span, .. } => {
+                lowerer.errors.push(LoweringError::ReadUninitialized(span));
+                let void = lowerer.typectx.void_typ();
+                lowerer.function.new_undef(void, lowerer.ctx)
+            }
+            Place::None => unreachable!(),
         }
     }
     #[track_caller]
@@ -85,18 +178,33 @@ impl Place {
             Place::SsaAssignableVar { prepass_varid, .. } => {
                 lowerer.write_variable(VarId::Id(prepass_varid), block, val);
             }
+            Place::UndefinedSsa { prepass_varid, .. } => {
+                lowerer.write_variable(VarId::Id(prepass_varid), block, val);
+            }
             Place::Ptr { val: ptr, span, .. } => {
-                let mem = lowerer.function.types.intern_deduplicated(Type::Memory);
+                let mem = lowerer.typectx.mem_typ();
                 let (val_id, _, _, _) =
                     lowerer.new_inst1(Opcode::Store, block, span, &[val, ptr], mem);
                 lowerer.write_variable(VarId::Mem, block, val_id);
             }
+            Place::None => unreachable!(),
         }
     }
-    fn get_ptr(self) -> ValueId {
+    #[track_caller]
+    fn get_ptr(self, lowerer: &mut FunctionLowerer) -> ValueId {
         match self {
             Place::Ptr { val, .. } => val,
+            Place::UndefinedSsa { span, .. } => {
+                lowerer.errors.push(LoweringError::ReadUninitialized(span));
+                let void = lowerer.typectx.void_typ();
+                lowerer.function.new_undef(void, lowerer.ctx)
+            }
             _ => unreachable!(),
+        }
+    }
+    fn check_init(self, lowerer: &mut FunctionLowerer) {
+        if let Place::UndefinedSsa { span, .. } = self {
+            lowerer.errors.push(LoweringError::ReadUninitialized(span));
         }
     }
     fn ssa(val: ValueId) -> Self {
@@ -112,10 +220,16 @@ impl Place {
             base_typ,
         }
     }
+    fn undefined(prepass_varid: prepass::VarId, span: Span) -> Self {
+        Self::UndefinedSsa {
+            prepass_varid,
+            span,
+        }
+    }
 }
 
 #[derive(Debug)]
-pub struct FunctionLowerer<'a> {
+struct FunctionLowerer<'a> {
     prepass: &'a mut LoweringPrepassOutput,
     symbol_table: &'a SymbolTable,
     ctx: &'a mut Context,
@@ -123,6 +237,8 @@ pub struct FunctionLowerer<'a> {
     function: &'a mut Function,
     sret: ValueId,
     struct_mapping: &'a mut AHashMap<Symbol, StructId>,
+    typectx: &'a mut TypeContext,
+    errors: &'a mut Vec<LoweringError>,
 
     current_def: &'a mut Vec<AHashMap<VarId, ValueId>>,
     incomplete_phis: &'a mut Vec<AHashMap<VarId, ValueId>>,
@@ -131,96 +247,114 @@ pub struct FunctionLowerer<'a> {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
-pub enum VarId {
+enum VarId {
     Mem,
     Id(prepass::VarId),
 }
 
 impl<'a> FunctionLowerer<'a> {
     fn lower(&mut self, decl: &ast::FunctionDeclaration) {
-        let entry_block = Block {
-            insts: Vec::new(),
-            preds: TinyVec::new(),
-            succs: TinyVec::new(),
-            dbg_name: Some(self.ctx.intern_symbol("Entry")),
-        };
-        let block = self.function.blocks.intern(entry_block);
+        let entry_sym = self.ctx.intern_symbol("entry");
+        let entry_block = self.new_block(entry_sym);
+        self.function.entry = entry_block;
         let mut sret_add = 0;
-        if let Some(return_type) = decl.return_type
-            && let typ = self.ctx.get_type(return_type.inner)
-            && (typ.is_struct() || typ.is_array())
-        {
+
+        let ret_id = if let Some(return_type) = decl.return_type {
             let typ_id = self.ast_to_ir_type(return_type.inner);
-            let sret = self.ctx.intern_symbol("sret");
-            let (val_id, _, val, inst) =
-                self.new_inst1(Opcode::Param, block, return_type.span, &[], typ_id);
-            inst.extra = InstExtraData::ParamIndex { index: 0 };
-            val.dbg_name = Some(sret);
-            self.sret = val_id;
-            sret_add = 1;
-        }
+            let ast_typ = self.ctx.get_type(return_type.inner);
+            if ast_typ.is_struct() || ast_typ.is_array() {
+                let sret = self.ctx.intern_symbol("sret");
+                let (val_id, _, val, inst) =
+                    self.new_inst1(Opcode::Param, entry_block, return_type.span, &[], typ_id);
+                inst.extra = InstExtraData::ParamIndex { index: 0 };
+                val.dbg_name = Some(sret);
+                self.sret = val_id;
+                sret_add = 1;
+                let ptr_typ = self.typectx.ptr_typ();
+                self.function.sig.params.push(FunctionParam {
+                    kind: FunctionParamKind::HiddenPtr,
+                    typ: ptr_typ,
+                });
+                self.typectx.void_typ()
+            } else {
+                typ_id
+            }
+        } else {
+            self.typectx.void_typ()
+        };
+        self.function.sig.ret = ret_id;
+
         let wildcard_prov = self
             .function
             .provenances
             .intern_deduplicated(Provenance::Wildcard);
         for (i, (name, typnode)) in decl.params.iter().enumerate() {
-            let (size, align) = layout_of_ast_type(typnode.inner, self.symbol_table, self.ctx);
             let typ_id = self.ast_to_ir_type(typnode.inner);
-            let typ = self.function.types.get(typ_id);
-            let var_id = *self
-                .prepass
-                .id_map
-                .get(&name.id)
-                .expect("Function param should be inserted");
+            let typ = self.typectx.get_type(typ_id);
+            let var_id = self.prepass.get_node_varid(name.id);
 
             // TODO: provenances
             // TODO: seal block
             match typ {
                 Type::Memory | Type::Void => unreachable!(),
                 Type::I64 | Type::Ptr | Type::FnPtr
-                    if let id = self
-                        .prepass
-                        .id_map
-                        .get(&name.id)
-                        .expect("Should be inserted")
-                        && let var = self.prepass.vars.get(*id)
+                    if let var = self.prepass.get_var(var_id)
                         && !var.address_taken =>
                 {
                     let (val_id, _, val, inst) =
-                        self.new_inst1(Opcode::Param, block, name.span, &[], typ_id);
+                        self.new_inst1(Opcode::Param, entry_block, name.span, &[], typ_id);
                     inst.extra = InstExtraData::ParamIndex {
                         index: (i + sret_add) as u32,
                     };
-                    val.dbg_name = Some(name.sym);
+                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+                    self.function.sig.params.push(FunctionParam {
+                        kind: FunctionParamKind::Arg,
+                        typ: typ_id,
+                    });
 
                     let ast_typ = self.ctx.get_type(typnode.inner);
                     if let ast::Type::Ptr { noalias, .. } = ast_typ {
                         let prov = if *noalias {
                             self.function
                                 .provenances
-                                .intern_deduplicated(Provenance::NoaliasPtr(val_id))
+                                .intern_deduplicated(Provenance::NoaliasArg(val_id))
                         } else {
                             wildcard_prov
                         };
                         self.function.value_provenances.insert(val_id, prov);
                     }
-                    self.write_variable(VarId::Id(var_id), block, val_id);
+                    self.write_variable(VarId::Id(var_id), entry_block, val_id);
                 }
-                _ => {
-                    let stackslot = StackSlot {
-                        size,
-                        align,
-                        dbg_name: Some(name.sym),
-                        kind: StackSlotKind::FnArgument { typ: typ_id },
-                        frame_offset: None,
-                    };
-                    let slot_id = self.function.stack_slots.intern(stackslot);
-
-                    let ptr_typ = self.function.types.intern_deduplicated(Type::Ptr);
+                Type::I64 | Type::Ptr | Type::FnPtr => {
                     let (val_id, _, val, inst) =
-                        self.new_inst1(Opcode::GetStackAddr, block, name.span, &[], ptr_typ);
+                        self.new_inst1(Opcode::Param, entry_block, name.span, &[], typ_id);
+                    inst.extra = InstExtraData::ParamIndex {
+                        index: (i + sret_add) as u32,
+                    };
+                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+                    self.function.sig.params.push(FunctionParam {
+                        kind: FunctionParamKind::Arg,
+                        typ: typ_id,
+                    });
+
+                    let slot_id =
+                        self.new_stackslot(8, 8, Some(name.sym), StackSlotKind::AddressTakenLocal);
+                    let ptr_typ = self.typectx.ptr_typ();
+                    let (ptr, _, val, inst) =
+                        self.new_inst1(Opcode::GetStackAddr, entry_block, name.span, &[], ptr_typ);
                     inst.extra = InstExtraData::StackSlot(slot_id);
-                    val.dbg_name = Some(name.sym);
+                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+
+                    let mem_typ = self.typectx.mem_typ();
+                    let (val_id, _, _, _) = self.new_inst1(
+                        Opcode::Store,
+                        entry_block,
+                        name.span,
+                        &[val_id, ptr],
+                        mem_typ,
+                    );
+
+                    self.write_variable(VarId::Mem, entry_block, val_id);
 
                     let prov = self
                         .function
@@ -228,12 +362,43 @@ impl<'a> FunctionLowerer<'a> {
                         .intern_deduplicated(Provenance::StackSlot(slot_id));
                     self.function.value_provenances.insert(val_id, prov);
 
-                    self.write_variable(VarId::Id(var_id), block, val_id);
+                    self.write_variable(VarId::Id(var_id), entry_block, ptr);
+                }
+                _ => {
+                    let size = self.typectx.type_size(typ_id);
+                    let align = self.typectx.type_align(typ_id);
+                    let slot_id = self.new_stackslot(
+                        size,
+                        align,
+                        Some(name.sym),
+                        StackSlotKind::FnArgument {
+                            typ: typ_id,
+                            idx: (i + sret_add) as u32,
+                        },
+                    );
+
+                    let ptr_typ = self.typectx.ptr_typ();
+                    let (val_id, _, val, inst) =
+                        self.new_inst1(Opcode::GetStackAddr, entry_block, name.span, &[], ptr_typ);
+                    inst.extra = InstExtraData::StackSlot(slot_id);
+                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+
+                    self.function.sig.params.push(FunctionParam {
+                        kind: FunctionParamKind::Arg,
+                        typ: ptr_typ,
+                    });
+
+                    let prov = self
+                        .function
+                        .provenances
+                        .intern_deduplicated(Provenance::StackSlot(slot_id));
+                    self.function.value_provenances.insert(val_id, prov);
+
+                    self.write_variable(VarId::Id(var_id), entry_block, val_id);
                 }
             }
         }
-        let cf_res = self.lower_block(&decl.body, block, None);
-        std::assert_matches!(cf_res, ControlFlow::Continue(_));
+        _ = self.lower_block(&decl.body, entry_block, None);
     }
     fn lower_block(
         &mut self,
@@ -276,7 +441,8 @@ impl<'a> FunctionLowerer<'a> {
                 self.lower_var_decl(*var_decl, block_id)
             }
             ast::StmtKind::Expr(expr_id) => {
-                let (_val, next) = self.lower_expr(*expr_id, block_id, None);
+                let (place, next) = self._lower_expr(*expr_id, block_id, None, false);
+                place.read(self, next);
                 ControlFlow::Continue(next)
             }
         }
@@ -308,19 +474,17 @@ impl<'a> FunctionLowerer<'a> {
     ) -> ControlFlow<(), BlockId> {
         let (cond, cond_block) = self.lower_expr(ifstmt.condition, block_id, None);
         let cond = cond.read(self, cond_block);
+
         let if_true = self.ctx.intern_symbol("if_true");
         let if_false = self.ctx.intern_symbol("if_false");
         let if_end = self.ctx.intern_symbol("if_end");
         let true_block_id = self.new_block(if_true);
-        let false_blockid_stmtid = ifstmt
-            .else_branch
-            .map(|else_branch| (self.new_block(if_false), else_branch));
         let end_block_id = self.new_block(if_end);
-        let false_target_id = if let Some((false_block, _stmt_id)) = false_blockid_stmtid {
-            false_block
-        } else {
-            end_block_id
+        let (false_target_id, false_stmtid) = match ifstmt.else_branch {
+            Some(else_branch) => (self.new_block(if_false), Some(else_branch)),
+            None => (end_block_id, None),
         };
+
         self.new_branch(
             cond_block,
             ifstmt.span,
@@ -329,8 +493,8 @@ impl<'a> FunctionLowerer<'a> {
             false_target_id,
         );
         let true_cf = self.lower_stmt(ifstmt.then_branch, true_block_id, loop_blocks);
-        let false_cf = if let Some((block_id, stmt_id)) = false_blockid_stmtid {
-            self.lower_stmt(stmt_id, block_id, loop_blocks)
+        let false_cf = if let Some(stmtid) = false_stmtid {
+            self.lower_stmt(stmtid, false_target_id, loop_blocks)
         } else {
             ControlFlow::Continue(end_block_id)
         };
@@ -360,8 +524,10 @@ impl<'a> FunctionLowerer<'a> {
         let start_block = self.new_block(while_start);
         let body_block = self.new_block(while_body);
         let end_block = self.new_block(while_end);
+
         // origin block always jumps to start block for cond eval
         self.new_jmp(block_id, while_loop.span, start_block);
+
         // start block checks cond, then branches to either loop body or the loop end
         let (val, val_block) = self.lower_expr(while_loop.condition, start_block, None);
         let val = val.read(self, val_block);
@@ -410,6 +576,7 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             self.new_jmp(start_block, for_loop.span, body_block);
         }
+
         let loop_blocks = LoopBlocks {
             cont: if for_loop.post.is_some() {
                 post_block
@@ -420,16 +587,16 @@ impl<'a> FunctionLowerer<'a> {
         };
         match self.lower_stmt(for_loop.body, body_block, Some(loop_blocks)) {
             ControlFlow::Continue(cont) => {
-                self.new_jmp(cont, for_loop.span, post_block);
+                self.new_jmp(cont, for_loop.span, loop_blocks.cont);
             }
             ControlFlow::Break(()) => {}
         }
-        if let Some(post) = for_loop.post {
+        let uses_post = !self.function.blocks.get(post_block).preds.is_empty();
+        if let Some(post) = for_loop.post
+            && uses_post
+        {
             let (_val, post_end_block) = self.lower_expr(post, post_block, None);
-            let uses_post = !self.function.blocks.get(post_block).preds.is_empty();
-            if uses_post {
-                self.new_jmp(post_end_block, for_loop.span, start_block);
-            }
+            self.new_jmp(post_end_block, for_loop.span, start_block);
         }
         ControlFlow::Continue(end_block)
     }
@@ -442,9 +609,9 @@ impl<'a> FunctionLowerer<'a> {
             (block_id, None)
         };
         let ret_type_id = self.function.sig.ret;
-        let ret_type = self.function.types.get(ret_type_id);
+        let ret_type = self.typectx.get_type(ret_type_id);
         if ret_type.is_struct() || ret_type.is_array() {
-            let mem_typ = self.function.types.intern_deduplicated(Type::Memory);
+            let mem_typ = self.typectx.mem_typ();
             let operand1 = val.expect("Should be caught in type checking");
             let (val_id, _, _, _) = self.new_inst1(
                 Opcode::Store,
@@ -478,40 +645,39 @@ impl<'a> FunctionLowerer<'a> {
         };
 
         let typ_id = self.get_expr_type(init);
-        let typ = self.function.types.get(typ_id);
+        let typ = self.typectx.get_type(typ_id);
 
-        let varid = *self
-            .prepass
-            .id_map
-            .get(&var_decl.name.id)
-            .expect("Should be added");
-        let var = self.prepass.vars.get(varid);
-        let size = self.function.type_size(typ_id);
-        let align = self.function.type_align(typ_id);
+        let varid = self.prepass.get_node_varid(var_decl.name.id);
+        let var = self.prepass.get_var(varid);
+        let size = self.typectx.type_size(typ_id);
+        let align = self.typectx.type_align(typ_id);
 
         if !(typ.is_struct() || typ.is_array()) {
             if var.address_taken {
-                let stack_slot = StackSlot {
+                let slot_id = self.new_stackslot(
                     size,
                     align,
-                    dbg_name: Some(var_decl.name.sym),
-                    kind: StackSlotKind::AddressTakenLocal,
-                    frame_offset: None,
-                };
-                let slot_id = self.function.stack_slots.intern(stack_slot);
-                let (var_ptr, _, _, inst) =
-                    self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], typ_id);
+                    Some(var_decl.name.sym),
+                    StackSlotKind::AddressTakenLocal,
+                );
+                let ptr_typ = self.typectx.ptr_typ();
+                let (var_ptr, _, val, inst) =
+                    self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
                 inst.extra = InstExtraData::StackSlot(slot_id);
+                val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
 
                 let (expr, next) = self.lower_expr(init, block_id, None);
                 let val_id = expr.read(self, next);
 
-                Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, block_id);
+                Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
                 self.write_variable(VarId::Id(varid), next, var_ptr);
                 return ControlFlow::Continue(next);
             } else {
                 let (expr, next) = self.lower_expr(init, block_id, None);
                 let val_id = expr.read(self, next);
+                let val = self.function.values.get_mut(val_id);
+                val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
+
                 self.write_variable(VarId::Id(varid), next, val_id);
                 return ControlFlow::Continue(next);
             }
@@ -523,10 +689,15 @@ impl<'a> FunctionLowerer<'a> {
             Some(var_decl.name.sym),
             StackSlotKind::Aggregate,
         );
-        let (var_ptr, _, _, inst) =
-            self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], typ_id);
+        let ptr_typ = self.typectx.ptr_typ();
+        let (var_ptr, _, val, inst) =
+            self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
         inst.extra = InstExtraData::StackSlot(stack_slot);
-        let (_val, next) = self.lower_expr(init, block_id, Some(var_ptr));
+        val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
+        let (place, next) = self.lower_expr(init, block_id, Some(var_ptr));
+        // Doing this allows emitting a compilation error if rhs is an undefined struct/array
+        place.check_init(self);
+        self.write_variable(VarId::Id(varid), next, var_ptr);
 
         ControlFlow::Continue(next)
     }
@@ -537,31 +708,43 @@ impl<'a> FunctionLowerer<'a> {
         block_id: BlockId,
         sptr: Option<ValueId>,
     ) -> (Place, BlockId) {
+        self._lower_expr(expr_id, block_id, sptr, true)
+    }
+
+    fn _lower_expr(
+        &mut self,
+        expr_id: ExprId,
+        block_id: BlockId,
+        sptr: Option<ValueId>,
+        // sometimes we want to call this with no sptr with an expression that has a
+        // "return type" of a struct. If we do this regularly, the lower_expr will think
+        // this is an "intermediate aggregate access" and will generate an sptr.
+        // But sometimes we don't want this, like in the case of assignment of structs.
+        // when the ExprStmt is lowered, it would generate a stackslot which is unneeded and unused
+        // and also when trying to assign to an ident that is undefined that is also a struct/array.
+        // This arg is here to prevent that in these cases.
+        gen_sptr: bool,
+    ) -> (Place, BlockId) {
         let exprspan = {
             let expr = self.ctx.get_expr(expr_id);
             expr.span
         };
         let sptr = {
             let typ_id = self.get_expr_type(expr_id);
-            let typ = self.function.types.get(typ_id);
-            if typ.is_array() || typ.is_struct() {
+            if self.needs_sptr(expr_id) && gen_sptr {
                 sptr.or_else(|| {
-                    let size = self.function.type_size(typ_id);
-                    let align = self.function.type_align(typ_id);
-                    let stackslot = StackSlot {
-                        size,
-                        align,
-                        dbg_name: None,
-                        kind: StackSlotKind::IntermediateAggregate,
-                        frame_offset: None,
-                    };
-                    let slot_id = self.function.stack_slots.intern(stackslot);
+                    let size = self.typectx.type_size(typ_id);
+                    let align = self.typectx.type_align(typ_id);
+                    let slot_id =
+                        self.new_stackslot(size, align, None, StackSlotKind::IntermediateAggregate);
+                    let ptr_typ = self.typectx.ptr_typ();
                     let (val, _, _, inst) =
-                        self.new_inst1(Opcode::GetStackAddr, block_id, exprspan, &[], typ_id);
+                        self.new_inst1(Opcode::GetStackAddr, block_id, exprspan, &[], ptr_typ);
                     inst.extra = InstExtraData::StackSlot(slot_id);
                     Some(val)
                 })
             } else {
+                assert!(sptr.is_none());
                 None
             }
         };
@@ -572,11 +755,11 @@ impl<'a> FunctionLowerer<'a> {
             ast::ExprKind::Ident(ident) => self.lower_ident(ident, block_id, sptr),
             ast::ExprKind::Int(int) => self.lower_int(int, block_id),
             ast::ExprKind::BinaryOp(binary_op) => self.lower_binary_op(binary_op, block_id),
-            ast::ExprKind::PrefixOp(prefix_op) => self.lower_prefix_op(prefix_op, block_id),
+            ast::ExprKind::PrefixOp(prefix_op) => self.lower_prefix_op(prefix_op, block_id, sptr),
             ast::ExprKind::PostfixOp(postfix_op) => self.lower_postfix_op(postfix_op, block_id),
             ast::ExprKind::Ternary(ternary) => self.lower_ternary(ternary, block_id, sptr),
             ast::ExprKind::FunctionCall(function_call) => {
-                self.lower_function_call(function_call, block_id, sptr)
+                self.lower_function_call(function_call, block_id, sptr, expr_id)
             }
             ast::ExprKind::ArrayIndex(array_index) => {
                 self.lower_array_index(array_index, block_id, sptr)
@@ -614,7 +797,7 @@ impl<'a> FunctionLowerer<'a> {
     fn lower_nullptr(&mut self, nullptr: ast::Nullptr, block_id: BlockId) -> (Place, BlockId) {
         let val_id = self.load_const(0, block_id, nullptr.span);
 
-        let typ = self.function.types.intern_deduplicated(Type::Ptr);
+        let typ = self.typectx.ptr_typ();
         let (val_id, _, _, inst) =
             self.new_inst1(Opcode::BitCast, block_id, nullptr.span, &[val_id], typ);
         inst.extra = InstExtraData::ElementType(typ);
@@ -639,7 +822,33 @@ impl<'a> FunctionLowerer<'a> {
         block_id: BlockId,
         sptr: Option<ValueId>,
     ) -> (Place, BlockId) {
-        todo!()
+        let var_id = self.prepass.get_node_varid(ident.id);
+        let var = self.prepass.get_var(var_id);
+        if var.is_global {
+            let typ = self.ast_to_ir_type(var.typ);
+            let (val_id, _, _, inst) =
+                self.new_inst1(Opcode::LoadGlobalLoc, block_id, ident.span, &[], typ);
+            inst.extra = InstExtraData::Global(ident.sym);
+            if var.is_function {
+                return (Place::ssa(val_id), block_id);
+            } else {
+                return (Place::ptr(val_id, ident.span, typ), block_id);
+            }
+        }
+        let Some(val) = self._read_variable(VarId::Id(var_id), block_id) else {
+            return (Place::undefined(var_id, ident.span), block_id);
+        };
+        if let Some(sptr) = sptr {
+            let typ = self.ast_to_ir_type(var.typ);
+            self.new_memcpy(block_id, ident.span, sptr, val, typ);
+            return (Place::ssa(sptr), block_id);
+        }
+        if var.address_taken {
+            let typ = self.ast_to_ir_type(var.typ);
+            (Place::ptr(val, ident.span, typ), block_id)
+        } else {
+            (Place::ssa_ident(val, var_id), block_id)
+        }
     }
     fn lower_int(&mut self, int: ast::Int, block_id: BlockId) -> (Place, BlockId) {
         let val_id = self.load_const(int.lit, block_id, int.span);
@@ -649,16 +858,24 @@ impl<'a> FunctionLowerer<'a> {
         match binop.kind {
             ast::BinaryOpKind::Assign => {
                 if self.needs_sptr(binop.right) {
-                    let (lhs_place, block) = self.lower_expr(binop.left, block_id, None);
-                    let lhs_ptr = lhs_place.get_ptr();
+                    let (lhs_place, block) = self._lower_expr(binop.left, block_id, None, false);
+                    let lhs_ptr = lhs_place.get_ptr(self);
                     // Passing the lhs_ptr as the sptr will make the children of this node copy into it
                     // effectively performing the assignment. So we don't need to do anything else but just exit.
-                    let (_rhs_place, block) = self.lower_expr(binop.right, block, Some(lhs_ptr));
+                    let (place, block) = self.lower_expr(binop.right, block, Some(lhs_ptr));
+
+                    // Doing this allows emitting a compilation error if rhs is an undefined struct/array
+                    place.check_init(self);
+
                     return (Place::ssa(lhs_ptr), block);
                 } else {
                     let (lhs_place, block) = self.lower_expr(binop.left, block_id, None);
                     let (rhs_place, block) = self.lower_expr(binop.right, block, None);
                     let rhs = rhs_place.read(self, block);
+                    if let ast::ExprKind::Ident(ident) = &self.ctx.get_expr(binop.left).kind {
+                        let val = self.function.values.get_mut(rhs);
+                        val.dbg_name = Some(val.dbg_name.unwrap_or(ident.sym));
+                    }
                     lhs_place.write(rhs, self, block);
                     return (Place::ssa(rhs), block);
                 }
@@ -673,6 +890,8 @@ impl<'a> FunctionLowerer<'a> {
                 let output_var = prepass::Var {
                     address_taken: false,
                     typ: int,
+                    is_global: false,
+                    is_function: false,
                 };
                 let var_id = self.prepass.vars.intern(output_var);
 
@@ -693,7 +912,35 @@ impl<'a> FunctionLowerer<'a> {
                 return (Place::ssa(res), end_block);
             }
             ast::BinaryOpKind::Or => {
-                todo!()
+                let or_end = self.ctx.intern_symbol("or_end");
+                let or_false = self.ctx.intern_symbol("or_false");
+                let end_block = self.new_block(or_end);
+                let false_block = self.new_block(or_false);
+
+                let int = self.ctx.intern_type(ast::Type::Int);
+                let output_var = prepass::Var {
+                    address_taken: false,
+                    typ: int,
+                    is_global: false,
+                    is_function: false,
+                };
+                let var_id = self.prepass.vars.intern(output_var);
+
+                let (lhs_place, next) = self.lower_expr(binop.left, block_id, None);
+                let lhs = lhs_place.read(self, next);
+
+                let t = self.load_const(1, next, binop.span);
+                self.write_variable(VarId::Id(var_id), next, t);
+
+                self.new_branch(next, binop.span, lhs, end_block, false_block);
+
+                let (rhs_place, next) = self.lower_expr(binop.right, false_block, None);
+                let rhs = rhs_place.read(self, next);
+                self.write_variable(VarId::Id(var_id), next, rhs);
+                self.new_jmp(next, binop.span, end_block);
+
+                let res = self.read_variable(VarId::Id(var_id), end_block);
+                return (Place::ssa(res), end_block);
             }
             _ => {}
         }
@@ -701,17 +948,17 @@ impl<'a> FunctionLowerer<'a> {
         let lhs = lhs_place.read(self, block);
         let (rhs_place, block) = self.lower_expr(binop.right, block, None);
         let rhs = rhs_place.read(self, block);
-        let lhs_typ_id = self.function.values.get(lhs).typ;
-        let rhs_typ_id = self.function.values.get(rhs).typ;
-        let lhs_typ = *self.function.types.get(lhs_typ_id);
-        let rhs_typ = *self.function.types.get(rhs_typ_id);
+        let lhs_typ_id = self.get_expr_type(binop.left);
+        let rhs_typ_id = self.get_expr_type(binop.right);
+        let lhs_typ = *self.typectx.get_type(lhs_typ_id);
+        let rhs_typ = *self.typectx.get_type(rhs_typ_id);
         match binop.kind {
             ast::BinaryOpKind::Assign | ast::BinaryOpKind::And | ast::BinaryOpKind::Or => {
                 unreachable!()
             }
             ast::BinaryOpKind::Add => match (lhs_typ, rhs_typ) {
                 (Type::I64, Type::I64) => {
-                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let typ = self.typectx.i64_typ();
                     let (val_id, _, _, _) =
                         self.new_inst1(Opcode::Add, block, binop.span, &[lhs, rhs], typ);
                     (Place::ssa(val_id), block)
@@ -722,7 +969,7 @@ impl<'a> FunctionLowerer<'a> {
                     } else {
                         (binop.right, &[rhs, lhs])
                     };
-                    let typ = self.function.types.intern_deduplicated(Type::Ptr);
+                    let typ = self.typectx.ptr_typ();
                     let pointee_type = self.get_expr_pointee_type(side_expr_id);
                     let (val_id, _, _, inst) =
                         self.new_inst1(Opcode::IndexAddr, block, binop.span, operands, typ);
@@ -736,13 +983,13 @@ impl<'a> FunctionLowerer<'a> {
             },
             ast::BinaryOpKind::Sub => match (lhs_typ, rhs_typ) {
                 (Type::I64, Type::I64) => {
-                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let typ = self.typectx.i64_typ();
                     let (val_id, _, _, _) =
                         self.new_inst1(Opcode::Sub, block, binop.span, &[lhs, rhs], typ);
                     (Place::ssa(val_id), block)
                 }
                 (Type::Ptr, Type::I64) => {
-                    let typ = self.function.types.intern_deduplicated(Type::Ptr);
+                    let typ = self.typectx.ptr_typ();
                     let pointee_type = self.get_expr_pointee_type(binop.left);
                     let (val_id, _, _, inst) =
                         self.new_inst1(Opcode::IndexAddr, block, binop.span, &[lhs, rhs], typ);
@@ -753,7 +1000,7 @@ impl<'a> FunctionLowerer<'a> {
                     (Place::ssa(val_id), block)
                 }
                 (Type::Ptr, Type::Ptr) => {
-                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let typ = self.typectx.i64_typ();
                     let (lhs, _, _, _) =
                         self.new_inst1(Opcode::BitCast, block, binop.span, &[lhs], typ);
                     let (rhs, _, _, _) =
@@ -762,12 +1009,21 @@ impl<'a> FunctionLowerer<'a> {
                         self.new_inst1(Opcode::Sub, block, binop.span, &[lhs, rhs], typ);
 
                     let pointee_type = self.get_expr_pointee_type(binop.left);
-                    let base_size = self.function.type_size(pointee_type);
+                    let base_size = self.typectx.type_size(pointee_type);
                     let base_size = i64::try_from(base_size).expect("Internal compiler error");
-                    let base_size = self.load_const(base_size, block, binop.span);
-                    let (res, _, _, _) =
-                        self.new_inst1(Opcode::Div, block, binop.span, &[raw_sub, base_size], typ);
-                    (Place::ssa(res), block)
+                    if base_size == 1 {
+                        (Place::ssa(raw_sub), block)
+                    } else {
+                        let base_size = self.load_const(base_size, block, binop.span);
+                        let (res, _, _, _) = self.new_inst1(
+                            Opcode::Div,
+                            block,
+                            binop.span,
+                            &[raw_sub, base_size],
+                            typ,
+                        );
+                        (Place::ssa(res), block)
+                    }
                 }
                 _ => unreachable!(),
             },
@@ -794,7 +1050,7 @@ impl<'a> FunctionLowerer<'a> {
             | ast::BinaryOpKind::LessOrEqual
             | ast::BinaryOpKind::NotEq
             | ast::BinaryOpKind::Eq => {
-                let typ = self.function.types.intern_deduplicated(Type::I64);
+                let typ = self.typectx.i64_typ();
                 let (val_id, _, _, _) = self.new_inst1(
                     binop_kind_to_opcode(binop.kind),
                     block,
@@ -810,7 +1066,7 @@ impl<'a> FunctionLowerer<'a> {
 
             ast::BinaryOpKind::AddAssign | ast::BinaryOpKind::SubAssign => match lhs_typ {
                 Type::I64 => {
-                    let typ = self.function.types.intern_deduplicated(Type::I64);
+                    let typ = self.typectx.i64_typ();
                     let (val_id, _, _, _) = self.new_inst1(
                         if binop.kind == ast::BinaryOpKind::Add {
                             Opcode::Add
@@ -826,7 +1082,7 @@ impl<'a> FunctionLowerer<'a> {
                     (Place::ssa(val_id), block)
                 }
                 Type::Ptr => {
-                    let typ = self.function.types.intern_deduplicated(Type::Ptr);
+                    let typ = self.typectx.ptr_typ();
                     let pointee_type = self.get_expr_pointee_type(binop.left);
                     let (val_id, _, _, inst) =
                         self.new_inst1(Opcode::IndexAddr, block, binop.span, &[lhs, rhs], typ);
@@ -840,17 +1096,21 @@ impl<'a> FunctionLowerer<'a> {
             },
         }
     }
-    fn lower_prefix_op(&mut self, prefixop: ast::PrefixOp, block_id: BlockId) -> (Place, BlockId) {
+    fn lower_prefix_op(
+        &mut self,
+        prefixop: ast::PrefixOp,
+        block_id: BlockId,
+        sptr: Option<ValueId>,
+    ) -> (Place, BlockId) {
         match prefixop.kind {
             ast::PrefixOpKind::Increment | ast::PrefixOpKind::Decrement => {
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
                 let val = place.read(self, block);
                 let expr_type = self.get_expr_type(prefixop.expr);
                 let one = self.load_const(1, block, prefixop.span);
-                let typ = self.function.types.get(expr_type);
-                match typ {
+                let typ = self.typectx.get_type(expr_type);
+                let val_id = match typ {
                     Type::I64 => {
-                        let typ = self.function.types.intern_deduplicated(Type::I64);
                         let (val_id, _, _, _) = self.new_inst1(
                             if prefixop.kind == ast::PrefixOpKind::Increment {
                                 Opcode::Add
@@ -860,34 +1120,33 @@ impl<'a> FunctionLowerer<'a> {
                             block,
                             prefixop.span,
                             &[val, one],
-                            typ,
+                            expr_type,
                         );
-                        place.write(val_id, self, block);
-                        (Place::ssa(val_id), block)
+                        val_id
                     }
                     Type::Ptr => {
-                        let typ = self.function.types.intern_deduplicated(Type::Ptr);
                         let pointee_type = self.get_expr_pointee_type(prefixop.expr);
                         let (val_id, _, _, inst) = self.new_inst1(
                             Opcode::IndexAddr,
                             block,
                             prefixop.span,
                             &[val, one],
-                            typ,
+                            expr_type,
                         );
                         inst.extra = InstExtraData::IndexAddrData {
                             typ: pointee_type,
                             forward: prefixop.kind == ast::PrefixOpKind::Increment,
                         };
-                        place.write(val_id, self, block);
-                        (Place::ssa(val_id), block)
+                        val_id
                     }
                     _ => unreachable!(),
-                }
+                };
+                place.write(val_id, self, block);
+                (Place::ssa(val_id), block)
             }
             ast::PrefixOpKind::UnaryPlus => self.lower_expr(prefixop.expr, block_id, None),
             ast::PrefixOpKind::UnaryMinus => {
-                let typ = self.function.types.intern_deduplicated(Type::I64);
+                let typ = self.typectx.i64_typ();
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
                 let val = place.read(self, block);
                 let (val_id, _, _, _) =
@@ -896,18 +1155,22 @@ impl<'a> FunctionLowerer<'a> {
             }
             ast::PrefixOpKind::AddressOf => {
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
-                let val = place.get_ptr();
+                let val = place.get_ptr(self);
                 (Place::ssa(val), block)
             }
             ast::PrefixOpKind::Dereference => {
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
                 let ptr = place.read(self, block);
                 let base_typ = self.get_expr_pointee_type(prefixop.expr);
-                let val = Place::ptr(ptr, prefixop.span, base_typ).read(self, block);
-                (Place::ssa(val), block)
+                if let Some(sptr) = sptr {
+                    self.new_memcpy(block, prefixop.span, sptr, ptr, base_typ);
+                    (Place::ssa(sptr), block)
+                } else {
+                    (Place::ptr(ptr, prefixop.span, base_typ), block)
+                }
             }
             ast::PrefixOpKind::Not => {
-                let typ = self.function.types.intern_deduplicated(Type::I64);
+                let typ = self.typectx.i64_typ();
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
                 let val = place.read(self, block);
                 let (val_id, _, _, _) =
@@ -915,7 +1178,7 @@ impl<'a> FunctionLowerer<'a> {
                 (Place::ssa(val_id), block)
             }
             ast::PrefixOpKind::BitNot => {
-                let typ = self.function.types.intern_deduplicated(Type::I64);
+                let typ = self.typectx.i64_typ();
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
                 let val = place.read(self, block);
                 let (val_id, _, _, _) =
@@ -933,10 +1196,9 @@ impl<'a> FunctionLowerer<'a> {
         let original_val = place.read(self, block);
         let expr_type = self.get_expr_type(postfixop.expr);
         let one = self.load_const(1, block, postfixop.span);
-        let typ = self.function.types.get(expr_type);
-        match typ {
+        let typ = self.typectx.get_type(expr_type);
+        let val_id = match typ {
             Type::I64 => {
-                let typ = self.function.types.intern_deduplicated(Type::I64);
                 let (val_id, _, _, _) = self.new_inst1(
                     if postfixop.kind == ast::PostfixOpKind::Increment {
                         Opcode::Add
@@ -946,30 +1208,29 @@ impl<'a> FunctionLowerer<'a> {
                     block,
                     postfixop.span,
                     &[original_val, one],
-                    typ,
+                    expr_type,
                 );
-                place.write(val_id, self, block);
-                (Place::ssa(original_val), block)
+                val_id
             }
             Type::Ptr => {
-                let typ = self.function.types.intern_deduplicated(Type::Ptr);
                 let pointee_type = self.get_expr_pointee_type(postfixop.expr);
                 let (val_id, _, _, inst) = self.new_inst1(
                     Opcode::IndexAddr,
                     block,
                     postfixop.span,
                     &[original_val, one],
-                    typ,
+                    expr_type,
                 );
                 inst.extra = InstExtraData::IndexAddrData {
                     typ: pointee_type,
                     forward: postfixop.kind == ast::PostfixOpKind::Increment,
                 };
-                place.write(val_id, self, block);
-                (Place::ssa(original_val), block)
+                val_id
             }
             _ => unreachable!(),
-        }
+        };
+        place.write(val_id, self, block);
+        (Place::ssa(original_val), block)
     }
     fn lower_ternary(
         &mut self,
@@ -984,6 +1245,8 @@ impl<'a> FunctionLowerer<'a> {
         let output_var = prepass::Var {
             address_taken: false,
             typ: typ.id,
+            is_global: false,
+            is_function: false,
         };
         let var_id = self.prepass.vars.intern(output_var);
         let ternary_true = self.ctx.intern_symbol("ternary_true");
@@ -1016,8 +1279,46 @@ impl<'a> FunctionLowerer<'a> {
         funccall: ast::FunctionCall,
         block_id: BlockId,
         sptr: Option<ValueId>,
+        expr_id: ExprId,
     ) -> (Place, BlockId) {
-        todo!()
+        let (func, next) = self.lower_expr(funccall.func_expr, block_id, None);
+        let func = func.read(self, next);
+        let mut args = Vec::new();
+        args.push(func);
+        if let Some(sptr) = sptr {
+            args.push(sptr);
+        }
+        let mut block = next;
+        for arg in funccall.args {
+            let (arg, next) = self.lower_expr(arg, block, None);
+            let arg = arg.read(self, next);
+            args.push(arg);
+            block = next;
+        }
+        let ast_typinfo = self.type_table[&funccall.id];
+        let ast_typ = self.ctx.get_type(ast_typinfo.id);
+        let no_return = {
+            let ast::Type::FuncPtr { return_type, .. } = ast_typ else {
+                unreachable!()
+            };
+            let typ = self.ctx.get_type(*return_type);
+            // If void, then obv no return value
+            // if struct or array, sret is used so no return value.
+            typ.is_void() || typ.is_struct() || typ.is_array()
+        };
+        if no_return {
+            self.new_inst0(Opcode::IndirectCall, block, funccall.span, &args);
+            if let Some(sptr) = sptr {
+                (Place::ssa(sptr), block)
+            } else {
+                (Place::None, block)
+            }
+        } else {
+            let typ = self.get_expr_type(expr_id);
+            let (val_id, _, _, _) =
+                self.new_inst1(Opcode::IndirectCall, block, funccall.span, &args, typ);
+            (Place::ssa(val_id), block)
+        }
     }
     fn lower_array_index(
         &mut self,
@@ -1030,12 +1331,13 @@ impl<'a> FunctionLowerer<'a> {
         let (index_place, block) = self.lower_expr(arrayindex.index, block, None);
         let index = index_place.read(self, block);
         let pointee_typ = self.get_expr_pointee_type(arrayindex.array);
+        let ptr_typ = self.typectx.ptr_typ();
         let (val_id, _, _, inst) = self.new_inst1(
             Opcode::IndexAddr,
             block,
             arrayindex.span,
             &[ptr, index],
-            pointee_typ,
+            ptr_typ,
         );
         inst.extra = InstExtraData::IndexAddrData {
             typ: pointee_typ,
@@ -1046,8 +1348,7 @@ impl<'a> FunctionLowerer<'a> {
             // whether this be an imtermediate aggregate access, or an assignment to a variable, etc.
             // It also means it's an aggregate, since it would've just been loaded from otherwise.
             // So we just instantly copy the aggregate into the sptr and return it.
-            let (_, inst) = self.new_inst0(Opcode::Memcpy, block, arrayindex.span, &[val_id, ptr]);
-            inst.extra = InstExtraData::ElementType(pointee_typ);
+            self.new_memcpy(block, arrayindex.span, ptr, val_id, pointee_typ);
             (Place::ssa(ptr), block)
         } else {
             (Place::ptr(val_id, arrayindex.span, pointee_typ), block)
@@ -1059,7 +1360,7 @@ impl<'a> FunctionLowerer<'a> {
         block_id: BlockId,
     ) -> (Place, BlockId) {
         let typ = self.ast_to_ir_type(size_of_type.typ.inner);
-        let size = self.function.type_size(typ);
+        let size = self.typectx.type_size(typ);
         let size: i64 = size.try_into().expect("Bigger than i64 size... why???");
         let constant = self.load_const(size, block_id, size_of_type.span);
         (Place::ssa(constant), block_id)
@@ -1079,19 +1380,24 @@ impl<'a> FunctionLowerer<'a> {
             .field_inits
             .iter()
             .copied()
-            .map(|(name, expr)| (expr, s_info.order[&name.sym]))
+            .map(|(name, expr)| (name.sym, expr, s_info.order[&name.sym]))
             .collect();
-        let ptr_typ = self.function.types.intern_deduplicated(Type::Ptr);
+        let struct_id = self.get_structid(struct_init.name.sym);
+        let ptr_typ = self.typectx.ptr_typ();
         let mut block = block_id;
-        for (expr, idx) in inits {
+        for (sym, expr, idx) in inits {
             if self.needs_sptr(expr) {
                 let (ptr, _, _, inst) =
                     self.new_inst1(Opcode::FieldAddr, block, struct_init.span, &[sptr], ptr_typ);
                 inst.extra = InstExtraData::StructField {
                     struct_sym: struct_init.name.sym,
+                    struct_id,
+                    member_sym: sym,
                     field: idx as u32,
                 };
-                let (_val, next) = self.lower_expr(expr, block, Some(ptr));
+                let (place, next) = self.lower_expr(expr, block, Some(ptr));
+                // Doing this allows emitting a compilation error if rhs is an undefined struct/array
+                place.check_init(self);
                 block = next;
             } else {
                 let (val, next) = self.lower_expr(expr, block, None);
@@ -1100,9 +1406,11 @@ impl<'a> FunctionLowerer<'a> {
                     self.new_inst1(Opcode::FieldAddr, next, struct_init.span, &[sptr], ptr_typ);
                 inst.extra = InstExtraData::StructField {
                     struct_sym: struct_init.name.sym,
+                    struct_id,
+                    member_sym: sym,
                     field: idx as u32,
                 };
-                let mem = self.function.types.intern_deduplicated(Type::Memory);
+                let mem = self.typectx.mem_typ();
                 let (mem_id, _, _, _) =
                     self.new_inst1(Opcode::Store, next, struct_init.span, &[val, ptr], mem);
                 self.write_variable(VarId::Mem, next, mem_id);
@@ -1119,7 +1427,7 @@ impl<'a> FunctionLowerer<'a> {
     ) -> (Place, BlockId) {
         let elem_type = self.get_expr_type(array_init.elements[0]);
         let mut block = block_id;
-        let ptr_typ = self.function.types.intern_deduplicated(Type::Ptr);
+        let ptr_typ = self.typectx.ptr_typ();
         for (index, expr) in array_init.elements.into_iter().enumerate() {
             if self.needs_sptr(expr) {
                 let num = self.load_const(index as i64, block, array_init.span);
@@ -1134,12 +1442,14 @@ impl<'a> FunctionLowerer<'a> {
                     typ: elem_type,
                     forward: true,
                 };
-                let (_val, next) = self.lower_expr(expr, block, Some(ptr));
+                let (place, next) = self.lower_expr(expr, block, Some(ptr));
+                // Doing this allows emitting a compilation error if rhs is an undefined struct/array
+                place.check_init(self);
                 block = next;
             } else {
                 let (val, next) = self.lower_expr(expr, block, None);
                 let val = val.read(self, next);
-                let num = self.load_const(index as i64, block, array_init.span);
+                let num = self.load_const(index as i64, next, array_init.span);
                 let (ptr, _, _, inst) = self.new_inst1(
                     Opcode::IndexAddr,
                     next,
@@ -1152,7 +1462,7 @@ impl<'a> FunctionLowerer<'a> {
                     forward: true,
                 };
 
-                let mem = self.function.types.intern_deduplicated(Type::Memory);
+                let mem = self.typectx.mem_typ();
                 let (mem_id, _, _, _) =
                     self.new_inst1(Opcode::Store, next, array_init.span, &[val, ptr], mem);
                 self.write_variable(VarId::Mem, next, mem_id);
@@ -1180,12 +1490,15 @@ impl<'a> FunctionLowerer<'a> {
             .get(&name)
             .expect("Should have been added");
         let index = s_info.order[&member_access.member_name.sym] as u32;
-        let field_typ = self.ast_to_ir_type(s_type.id);
+        let field_id = s_info.fields[&member_access.member_name.sym].typ;
+        let field_typ = self.ast_to_ir_type(field_id);
+
+        let ptr_typ = self.typectx.ptr_typ();
 
         let (place, block) = self.lower_expr(member_access.struct_expr, block_id, None);
         let ptr = place.read(self, block);
-        let ptr_typ = self.function.types.intern_deduplicated(Type::Ptr);
 
+        let struct_id = self.get_structid(name);
         let (field_ptr, _, _, inst) = self.new_inst1(
             Opcode::FieldAddr,
             block,
@@ -1195,19 +1508,16 @@ impl<'a> FunctionLowerer<'a> {
         );
         inst.extra = InstExtraData::StructField {
             struct_sym: name,
+            member_sym: member_access.member_name.sym,
+            struct_id,
             field: index,
         };
+
         if let Some(sptr) = sptr {
             // If sptr was given it means this struct field is an aggregate and is being copied somewhere,
             // So we just instantly copy the aggregate into the sptr and return it.
-            let (_, inst) = self.new_inst0(
-                Opcode::Memcpy,
-                block,
-                member_access.span,
-                &[field_ptr, sptr],
-            );
-            inst.extra = InstExtraData::ElementType(field_typ);
-            (Place::ssa(ptr), block)
+            self.new_memcpy(block, member_access.span, sptr, field_ptr, field_typ);
+            (Place::ssa(field_ptr), block)
         } else {
             (Place::ptr(field_ptr, member_access.span, field_typ), block)
         }
@@ -1235,12 +1545,14 @@ impl<'a> FunctionLowerer<'a> {
             .get(&name)
             .expect("Should have been added");
         let index = s_info.order[&pointer_member_access.member_name.sym] as u32;
-        let field_typ = self.ast_to_ir_type(s_type.id);
+        let field_id = s_info.fields[&pointer_member_access.member_name.sym].typ;
+        let field_typ = self.ast_to_ir_type(field_id);
 
         let (place, block) = self.lower_expr(pointer_member_access.struct_ptr_expr, block_id, None);
         let ptr = place.read(self, block);
-        let ptr_typ = self.function.types.intern_deduplicated(Type::Ptr);
+        let ptr_typ = self.typectx.ptr_typ();
 
+        let struct_id = self.get_structid(name);
         let (field_ptr, _, _, inst) = self.new_inst1(
             Opcode::FieldAddr,
             block,
@@ -1251,18 +1563,20 @@ impl<'a> FunctionLowerer<'a> {
         inst.extra = InstExtraData::StructField {
             struct_sym: name,
             field: index,
+            member_sym: pointer_member_access.member_name.sym,
+            struct_id,
         };
         if let Some(sptr) = sptr {
             // If sptr was given it means this struct field is an aggregate and is being copied somewhere,
             // So we just instantly copy the aggregate into the sptr and return it.
-            let (_, inst) = self.new_inst0(
-                Opcode::Memcpy,
+            self.new_memcpy(
                 block,
                 pointer_member_access.span,
-                &[field_ptr, sptr],
+                sptr,
+                field_ptr,
+                field_typ,
             );
-            inst.extra = InstExtraData::ElementType(field_typ);
-            (Place::ssa(ptr), block)
+            (Place::ssa(field_ptr), block)
         } else {
             (
                 Place::ptr(field_ptr, pointer_member_access.span, field_typ),
@@ -1275,28 +1589,68 @@ impl<'a> FunctionLowerer<'a> {
         copy_prov: ast::CopyProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        todo!()
+        let (ptr_place, next) = self.lower_expr(copy_prov.prov_ptr, block_id, None);
+        let ptr = ptr_place.read(self, next);
+        let (addr_place, next) = self.lower_expr(copy_prov.addr, next, None);
+        let addr = addr_place.read(self, next);
+        let ptr_typ = self.typectx.ptr_typ();
+        let (val_id, _, _, _) = self.new_inst1(
+            Opcode::CopyProvenance,
+            next,
+            copy_prov.span,
+            &[ptr, addr],
+            ptr_typ,
+        );
+        (Place::ssa(val_id), next)
     }
     fn lower_expose_prov(
         &mut self,
         expose_prov: ast::ExposeProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        todo!()
+        let (ptr_place, next) = self.lower_expr(expose_prov.ptr, block_id, None);
+        let ptr = ptr_place.read(self, next);
+        let i64_typ = self.typectx.i64_typ();
+        let (val_id, _, _, _) = self.new_inst1(
+            Opcode::ExposeProvenance,
+            next,
+            expose_prov.span,
+            &[ptr],
+            i64_typ,
+        );
+        (Place::ssa(val_id), next)
     }
     fn lower_unexpose_prov(
         &mut self,
         unexpose_prov: ast::UnexposeProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        todo!()
+        let (addr_place, next) = self.lower_expr(unexpose_prov.int, block_id, None);
+        let addr = addr_place.read(self, next);
+        let ptr_typ = self.typectx.ptr_typ();
+        let (val_id, _, _, _) = self.new_inst1(
+            Opcode::UnexposeProvenance,
+            next,
+            unexpose_prov.span,
+            &[addr],
+            ptr_typ,
+        );
+        (Place::ssa(val_id), next)
     }
     fn lower_new_prov(
         &mut self,
         new_prov: ast::NewProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        todo!()
+        let (ptr_place, next) = self.lower_expr(new_prov.ptr, block_id, None);
+        let ptr = ptr_place.read(self, next);
+        let ptr_typ = self.typectx.ptr_typ();
+        let (val_id, inst_id, _, _) =
+            self.new_inst1(Opcode::NewProvenance, next, new_prov.span, &[ptr], ptr_typ);
+        let prov = Provenance::NewProv(NewProvInst(inst_id));
+        let prov_id = self.function.provenances.intern_deduplicated(prov);
+        self.function.value_provenances.insert(val_id, prov_id);
+        (Place::ssa(val_id), next)
     }
 }
 
@@ -1317,7 +1671,7 @@ impl<'a> FunctionLowerer<'a> {
         };
         self.function.stack_slots.intern(slot)
     }
-    pub fn new_jmp(
+    fn new_jmp(
         &mut self,
         block: BlockId,
         span: Span,
@@ -1328,7 +1682,7 @@ impl<'a> FunctionLowerer<'a> {
         inst.extra = InstExtraData::Jump { target: jmp_target };
         (instid, inst)
     }
-    pub fn new_branch(
+    fn new_branch(
         &mut self,
         block: BlockId,
         span: Span,
@@ -1348,7 +1702,7 @@ impl<'a> FunctionLowerer<'a> {
 
     fn needs_sptr(&mut self, expr: ExprId) -> bool {
         let typ_id = self.get_expr_type(expr);
-        let typ = self.function.types.get(typ_id);
+        let typ = self.typectx.get_type(typ_id);
         typ.is_array() || typ.is_struct()
     }
     #[track_caller]
@@ -1426,7 +1780,7 @@ impl<'a> FunctionLowerer<'a> {
         (inst_id, inst)
     }
     fn load_const(&mut self, int: i64, block: BlockId, span: Span) -> ValueId {
-        let typ = self.function.types.intern_deduplicated(Type::I64);
+        let typ = self.typectx.i64_typ();
         let (val_id, _, _, inst) = self.new_inst1(Opcode::LoadConst, block, span, &[], typ);
         inst.extra = InstExtraData::ConstInt(int);
         val_id
@@ -1439,42 +1793,57 @@ impl<'a> FunctionLowerer<'a> {
     }
     fn new_block(&mut self, dbg_name: Symbol) -> BlockId {
         let block = Block::new(dbg_name);
-        self.function.blocks.intern(block)
+        let id = self.function.blocks.intern(block);
+        let id_usize = id.get() as usize;
+        if self.current_def.len() <= id_usize {
+            self.current_def.resize_with(id_usize + 1, AHashMap::new);
+        }
+        if self.sealed_blocks.len() <= id_usize {
+            self.sealed_blocks.resize(id_usize + 1, false);
+        }
+        if self.incomplete_phis.len() <= id_usize {
+            self.incomplete_phis
+                .resize_with(id_usize + 1, AHashMap::new);
+        }
+
+        id
     }
     fn ast_to_ir_type(&mut self, typ: crate::syntax::context::TypeId) -> TypeId {
         ast_to_ir_type(typ, self)
     }
     fn get_var_type(&mut self, var: VarId) -> TypeId {
         match var {
-            VarId::Mem => self.function.types.intern_deduplicated(Type::Memory),
+            VarId::Mem => self.typectx.mem_typ(),
             VarId::Id(var_id) => {
-                let var = self.prepass.vars.get(var_id);
+                let var = self.prepass.get_var(var_id);
                 self.ast_to_ir_type(var.typ)
             }
         }
     }
     fn block_sealed(&mut self, block: BlockId) -> bool {
         let block = block.get() as usize;
-        if self.sealed_blocks.len() <= block {
-            self.sealed_blocks.resize(block + 1, false);
-        }
         self.sealed_blocks[block]
     }
     fn write_variable(&mut self, var: VarId, block: BlockId, value: ValueId) {
-        self.current_def[block.get() as usize].insert(var, value);
+        let block = block.get() as usize;
+        self.current_def[block].insert(var, value);
     }
+    #[track_caller]
     fn read_variable(&mut self, var: VarId, block: BlockId) -> ValueId {
+        self._read_variable(var, block)
+            .expect("Internal Compiler Error")
+    }
+    fn _read_variable(&mut self, var: VarId, block: BlockId) -> Option<ValueId> {
         if let Some(val) = self.current_def[block.get() as usize].get(&var) {
-            return self.resolve_alias(*val);
+            return Some(self.resolve_alias(*val));
         }
         self.read_variable_recursive(var, block)
     }
-    fn read_variable_recursive(&mut self, var: VarId, block_id: BlockId) -> ValueId {
+    fn read_variable_recursive(&mut self, var: VarId, block_id: BlockId) -> Option<ValueId> {
         {
             let block = self.function.blocks.get(block_id);
             if block.preds.is_empty() {
-                let typ = self.function.types.intern_deduplicated(Type::Void);
-                return self.function.new_undef(typ, self.ctx);
+                return None;
             }
         }
         let val = if !self.block_sealed(block_id) {
@@ -1493,7 +1862,7 @@ impl<'a> FunctionLowerer<'a> {
             self.add_phi_operands(var, block_id, val)
         };
         self.write_variable(var, block_id, val);
-        val
+        Some(val)
     }
     fn add_phi_operands(&mut self, var: VarId, block_id: BlockId, phi_id: ValueId) -> ValueId {
         let block = self.function.blocks.get(block_id);
@@ -1558,9 +1927,6 @@ impl<'a> FunctionLowerer<'a> {
             self.add_phi_operands(var, block_id, arg);
         }
         let block = block_id.get() as usize;
-        if self.sealed_blocks.len() <= block {
-            self.sealed_blocks.resize(block + 1, false);
-        }
         self.sealed_blocks[block] = true;
     }
     fn resolve_alias(&self, mut val: ValueId) -> ValueId {
@@ -1568,6 +1934,33 @@ impl<'a> FunctionLowerer<'a> {
             val = *alias;
         }
         val
+    }
+    fn new_memcpy(
+        &mut self,
+        block: BlockId,
+        span: Span,
+        to: ValueId,
+        from: ValueId,
+        elem_typ: TypeId,
+    ) {
+        let mem_typ = self.typectx.mem_typ();
+        let mem_val = self
+            ._read_variable(VarId::Mem, block)
+            .unwrap_or_else(|| self.function.new_undef(mem_typ, self.ctx));
+        let (val_id, _, _, inst) =
+            self.new_inst1(Opcode::Memcpy, block, span, &[to, from, mem_val], mem_typ);
+        inst.extra = InstExtraData::ElementType(elem_typ);
+        self.write_variable(VarId::Mem, block, val_id);
+    }
+    fn get_structid(&mut self, sym: Symbol) -> StructId {
+        let asttyp = ast::Type::Struct { name: sym };
+        let asttyp_id = self.ctx.intern_type(asttyp);
+        let id = self.ast_to_ir_type(asttyp_id);
+        let typ = self.typectx.get_type(id);
+        let Type::Struct(id) = typ else {
+            unreachable!();
+        };
+        *id
     }
 }
 
@@ -1660,7 +2053,7 @@ fn ast_to_ir_type(typ: crate::syntax::context::TypeId, lowerer: &mut FunctionLow
                 offsets,
                 field_types,
             };
-            let sid = lowerer.function.structs.intern_deduplicated(s);
+            let sid = lowerer.typectx.intern_struct(s);
             Type::Struct(sid)
         }
         ast::Type::Array { element_type, len } => {
@@ -1672,29 +2065,7 @@ fn ast_to_ir_type(typ: crate::syntax::context::TypeId, lowerer: &mut FunctionLow
         }
         ast::Type::FuncPtr { .. } => Type::FnPtr,
     };
-    lowerer.function.types.intern_deduplicated(typ)
-}
-
-fn layout_of_ast_type(
-    typ: crate::syntax::context::TypeId,
-    table: &SymbolTable,
-    ctx: &Context,
-) -> (u64, u64) {
-    let typ = ctx.get_type(typ);
-    match typ {
-        ast::Type::Void => unreachable!(),
-        ast::Type::Int => (8, 8),
-        ast::Type::Ptr { .. } => (8, 8),
-        ast::Type::Struct { name } => {
-            let layout = table.structs.get(name).expect("Should be interned").layout;
-            (layout.size as u64, layout.align as u64)
-        }
-        ast::Type::Array { element_type, len } => {
-            let (e_size, e_align) = layout_of_ast_type(*element_type, table, ctx);
-            (e_size * *len as u64, e_align)
-        }
-        ast::Type::FuncPtr { .. } => (8, 8),
-    }
+    lowerer.typectx.intern_type(typ)
 }
 
 fn binop_kind_to_opcode(kind: ast::BinaryOpKind) -> Opcode {

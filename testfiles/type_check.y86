@@ -513,6 +513,7 @@ fn i_preincr4() { let a: Struct; ++a; }
 fn i_preincr5() { let a: [int; 2]; ++a; }
 fn i_preincr6() { let a: fn(); ++a; }
 fn i_preincr7() { ++1; }
+fn i_preincr8() { let x: int = 1; ++x = 5; }
 
 fn v_predecr1() { let a: int; a = --a; }
 fn v_predecr2() { let a: *int; a = --a; }
@@ -548,6 +549,14 @@ fn i_bitnot8() { let a: int = ~u_void(); }
 
 fn v_deref() { let a: int = *1 as *int; }
 fn v_deref() { let a: int; a = *&a; }
+fn v_deref() {
+    let a: *int;
+    *a = 5;
+}
+fn v_deref() {
+    let a: fn() -> *int;
+    *a() = 5;
+}
 fn i_deref() { *5; }
 fn i_deref() { *Struct {}; }
 fn i_deref() { *[1]; }

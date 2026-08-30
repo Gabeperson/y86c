@@ -16,6 +16,100 @@ pub mod arenas {
 }
 pub use arenas::*;
 
+#[derive(Clone, Debug)]
+pub struct TypeContext {
+    types: TypeArena,
+    structs: StructArena,
+    ptr: TypeId,
+    i64: TypeId,
+    mem: TypeId,
+    fnptr: TypeId,
+    void: TypeId,
+}
+
+impl Default for TypeContext {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl TypeContext {
+    pub fn new() -> Self {
+        let mut types = TypeArena::new();
+        let ptr = types.intern_deduplicated(Type::Ptr);
+        let i64 = types.intern_deduplicated(Type::I64);
+        let mem = types.intern_deduplicated(Type::Memory);
+        let fnptr = types.intern_deduplicated(Type::FnPtr);
+        let void = types.intern_deduplicated(Type::Void);
+        Self {
+            types,
+            structs: StructArena::new(),
+            ptr,
+            i64,
+            mem,
+            fnptr,
+            void,
+        }
+    }
+    pub fn intern_type(&mut self, typ: Type) -> TypeId {
+        self.types.intern_deduplicated(typ)
+    }
+    pub fn get_type(&self, id: TypeId) -> &Type {
+        self.types.get(id)
+    }
+    pub fn intern_struct(&mut self, s: StructInfo) -> StructId {
+        self.structs.intern_deduplicated(s)
+    }
+    pub fn get_struct(&self, id: StructId) -> &StructInfo {
+        self.structs.get(id)
+    }
+    pub fn ptr_typ(&self) -> TypeId {
+        self.ptr
+    }
+    pub fn i64_typ(&self) -> TypeId {
+        self.i64
+    }
+    pub fn mem_typ(&self) -> TypeId {
+        self.mem
+    }
+    pub fn fnptr_typ(&self) -> TypeId {
+        self.fnptr
+    }
+    pub fn void_typ(&self) -> TypeId {
+        self.void
+    }
+    pub fn type_size(&self, type_id: TypeId) -> u64 {
+        let typ = self.get_type(type_id);
+        match typ {
+            Type::I64 => 8,
+            Type::Ptr => 8,
+            Type::FnPtr => 8,
+            Type::Void => 1,
+            Type::Memory => unreachable!(),
+            Type::Struct(struct_id) => {
+                let struct_info = self.get_struct(*struct_id);
+                struct_info.size
+            }
+            Type::Array { element, len } => self.type_size(*element) * *len,
+        }
+    }
+    pub fn type_align(&self, type_id: TypeId) -> u64 {
+        let typ = self.get_type(type_id);
+        match typ {
+            Type::I64 => 8,
+            Type::Ptr => 8,
+            Type::FnPtr => 8,
+            Type::Void => 1,
+            Type::Memory => unreachable!(),
+            Type::Struct(struct_id) => {
+                let struct_info = self.get_struct(*struct_id);
+                struct_info.align
+            }
+            Type::Array { element, .. } => self.type_align(*element),
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Copy)]
 pub enum Type {
     I64,
@@ -59,10 +153,9 @@ pub struct FunctionArg(pub ValueId);
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub enum Provenance {
     StackSlot(StackSlotId),
-    NoaliasPtr(ValueId),
+    NoaliasArg(ValueId),
     NewProv(NewProvInst),
-    TransparentReturn(ValueId),
-    OpaqueReturn(OpaqueFnReturn),
+    NoAliasFnReturn(ValueId),
     Global(Symbol),
     Wildcard,
 }
@@ -115,8 +208,7 @@ pub struct StackSlot {
 pub enum StackSlotKind {
     AddressTakenLocal,
     Aggregate,
-    FnArgument { typ: TypeId },
-    Spill,
+    FnArgument { typ: TypeId, idx: u32 },
     IntermediateAggregate,
 }
 
@@ -162,8 +254,7 @@ pub enum InstExtraData {
     StackSlot(StackSlotId),
     // LoadGlobalLoc
     Global(Symbol),
-    // Call
-    Function(Symbol),
+    // Memcpy/bitcast
     ElementType(TypeId),
     // IndexAddr
     IndexAddrData {
@@ -177,6 +268,8 @@ pub enum InstExtraData {
     // FieldAddr
     StructField {
         struct_sym: Symbol,
+        member_sym: Symbol,
+        struct_id: StructId,
         field: u32,
     },
     // Branch
@@ -276,7 +369,6 @@ pub enum Opcode {
     BitOr,
     Xor,
     Mod,
-    Assign,
     Neg,
     BitNot,
     Not,
@@ -318,39 +410,4 @@ pub struct Function {
     pub values: ValueArena,
     pub provenances: ProvenanceArena,
     pub value_provenances: AHashMap<ValueId, ProvenanceId>,
-    pub structs: StructArena,
-    pub types: TypeArena,
-}
-
-impl Function {
-    pub fn type_size(&self, type_id: TypeId) -> u64 {
-        let typ = self.types.get(type_id);
-        match typ {
-            Type::I64 => 8,
-            Type::Ptr => 8,
-            Type::FnPtr => 8,
-            Type::Void => 1,
-            Type::Memory => unreachable!(),
-            Type::Struct(struct_id) => {
-                let struct_info = self.structs.get(*struct_id);
-                struct_info.size
-            }
-            Type::Array { element, len } => self.type_size(*element) * *len,
-        }
-    }
-    pub fn type_align(&self, type_id: TypeId) -> u64 {
-        let typ = self.types.get(type_id);
-        match typ {
-            Type::I64 => 8,
-            Type::Ptr => 8,
-            Type::FnPtr => 8,
-            Type::Void => 1,
-            Type::Memory => unreachable!(),
-            Type::Struct(struct_id) => {
-                let struct_info = self.structs.get(*struct_id);
-                struct_info.align
-            }
-            Type::Array { element, .. } => self.type_align(*element),
-        }
-    }
 }
