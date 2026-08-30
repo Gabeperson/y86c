@@ -37,29 +37,29 @@ impl<K, V> ScopedHashMap<K, V> {
 }
 impl<K: std::hash::Hash + Eq + Copy, V: Copy> ScopedHashMap<K, V> {
     pub fn enter_scope(&mut self) {
+        self.generation += 1;
         self.generation_by_depth.push(self.generation);
     }
     pub fn exit_scope(&mut self) {
-        self.generation += 1;
-        let level = self.generation_by_depth.len() as u32;
-        self.generation_by_depth.pop();
+        let level = (self.generation_by_depth.len() - 1) as u32;
         while let Some((sym, val, lvl)) = self.shadowed.last()
             && *lvl == level
         {
             self.map.insert(*sym, *val);
             self.shadowed.pop();
         }
+        self.generation_by_depth.pop();
     }
     pub fn insert(&mut self, key: K, val: V) {
         let level = (self.generation_by_depth.len() - 1) as u32;
+        let generation = self.generation_by_depth[level as usize];
         let val = Val {
             val,
             level,
-            generation: self.generation,
+            generation,
         };
         if let Some(prev) = self.map.insert(key, val) {
-            self.shadowed
-                .push((key, prev, self.generation_by_depth.len() as u32));
+            self.shadowed.push((key, prev, level));
         }
     }
     pub fn get(&self, key: K) -> Option<V> {
@@ -173,5 +173,11 @@ mod test {
         assert_eq!(map.get_current_scope(s1), Some(t2));
         map.exit_scope();
         assert_eq!(map.get_current_scope(s1), Some(t1));
+
+        map.clear();
+        map.enter_scope();
+        map.exit_scope();
+        map.insert(s1, t1);
+        assert_eq!(map.get(s1), Some(t1));
     }
 }
