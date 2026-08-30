@@ -99,6 +99,7 @@ impl<'a> Lowerer<'a> {
             function: &mut function,
             sret: ValueId::default(),
             errors: &mut self.errors,
+            return_typ: TypeId::default(),
             struct_mapping: &mut self.struct_mapping,
             typectx: &mut self.typectx,
             current_def: &mut self.current_def,
@@ -191,20 +192,10 @@ impl Place {
         }
     }
     #[track_caller]
-    fn get_ptr(self, lowerer: &mut FunctionLowerer) -> ValueId {
+    fn get_ptr(self) -> ValueId {
         match self {
             Place::Ptr { val, .. } => val,
-            Place::UndefinedSsa { span, .. } => {
-                lowerer.errors.push(LoweringError::ReadUninitialized(span));
-                let void = lowerer.typectx.void_typ();
-                lowerer.function.new_undef(void, lowerer.ctx)
-            }
             _ => unreachable!(),
-        }
-    }
-    fn check_init(self, lowerer: &mut FunctionLowerer) {
-        if let Place::UndefinedSsa { span, .. } = self {
-            lowerer.errors.push(LoweringError::ReadUninitialized(span));
         }
     }
     fn ssa(val: ValueId) -> Self {
@@ -239,6 +230,7 @@ struct FunctionLowerer<'a> {
     struct_mapping: &'a mut AHashMap<Symbol, StructId>,
     typectx: &'a mut TypeContext,
     errors: &'a mut Vec<LoweringError>,
+    return_typ: TypeId,
 
     current_def: &'a mut Vec<AHashMap<VarId, ValueId>>,
     incomplete_phis: &'a mut Vec<AHashMap<VarId, ValueId>>,
@@ -256,6 +248,7 @@ impl<'a> FunctionLowerer<'a> {
     fn lower(&mut self, decl: &ast::FunctionDeclaration) {
         let entry_sym = self.ctx.intern_symbol("entry");
         let entry_block = self.new_block(entry_sym);
+        self.seal_block(entry_block);
         self.function.entry = entry_block;
         let mut sret_add = 0;
 
@@ -264,13 +257,14 @@ impl<'a> FunctionLowerer<'a> {
             let ast_typ = self.ctx.get_type(return_type.inner);
             if ast_typ.is_struct() || ast_typ.is_array() {
                 let sret = self.ctx.intern_symbol("sret");
+                let ptr_typ = self.typectx.ptr_typ();
                 let (val_id, _, val, inst) =
-                    self.new_inst1(Opcode::Param, entry_block, return_type.span, &[], typ_id);
+                    self.new_inst1(Opcode::Param, entry_block, return_type.span, &[], ptr_typ);
                 inst.extra = InstExtraData::ParamIndex { index: 0 };
                 val.dbg_name = Some(sret);
                 self.sret = val_id;
+                self.return_typ = typ_id;
                 sret_add = 1;
-                let ptr_typ = self.typectx.ptr_typ();
                 self.function.sig.params.push(FunctionParam {
                     kind: FunctionParamKind::HiddenPtr,
                     typ: ptr_typ,
@@ -294,7 +288,6 @@ impl<'a> FunctionLowerer<'a> {
             let var_id = self.prepass.get_node_varid(name.id);
 
             // TODO: provenances
-            // TODO: seal block
             match typ {
                 Type::Memory | Type::Void => unreachable!(),
                 Type::I64 | Type::Ptr | Type::FnPtr
@@ -492,6 +485,10 @@ impl<'a> FunctionLowerer<'a> {
             true_block_id,
             false_target_id,
         );
+        self.seal_block(true_block_id);
+        if false_target_id != end_block_id {
+            self.seal_block(false_target_id);
+        }
         let true_cf = self.lower_stmt(ifstmt.then_branch, true_block_id, loop_blocks);
         let false_cf = if let Some(stmtid) = false_stmtid {
             self.lower_stmt(stmtid, false_target_id, loop_blocks)
@@ -506,6 +503,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.new_jmp(block, ifstmt.span, end_block_id);
             }
         }
+        self.seal_block(end_block_id);
         if let (ControlFlow::Break(()), ControlFlow::Break(())) = (true_cf, false_cf) {
             // If both branches diverge then we dont even need to codegen stuff after it
             ControlFlow::Break(())
@@ -532,6 +530,7 @@ impl<'a> FunctionLowerer<'a> {
         let (val, val_block) = self.lower_expr(while_loop.condition, start_block, None);
         let val = val.read(self, val_block);
         self.new_branch(val_block, while_loop.span, val, body_block, end_block);
+        self.seal_block(body_block);
 
         let loop_blocks = LoopBlocks {
             cont: start_block,
@@ -543,6 +542,8 @@ impl<'a> FunctionLowerer<'a> {
             }
             ControlFlow::Break(()) => {}
         }
+        self.seal_block(start_block);
+        self.seal_block(end_block);
         ControlFlow::Continue(end_block)
     }
     fn lower_for(&mut self, for_loop: ast::ForLoop, block_id: BlockId) -> ControlFlow<(), BlockId> {
@@ -576,6 +577,7 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             self.new_jmp(start_block, for_loop.span, body_block);
         }
+        self.seal_block(body_block);
 
         let loop_blocks = LoopBlocks {
             cont: if for_loop.post.is_some() {
@@ -595,12 +597,25 @@ impl<'a> FunctionLowerer<'a> {
         if let Some(post) = for_loop.post
             && uses_post
         {
+            self.seal_block(post_block);
             let (_val, post_end_block) = self.lower_expr(post, post_block, None);
             self.new_jmp(post_end_block, for_loop.span, start_block);
         }
+        self.seal_block(start_block);
+        self.seal_block(end_block);
         ControlFlow::Continue(end_block)
     }
     fn lower_return(&mut self, return_stmt: ast::ReturnStmt, block_id: BlockId) {
+        let ret_type_id = self.return_typ;
+        let ret_type = self.typectx.get_type(ret_type_id);
+        if ret_type.is_struct() || ret_type.is_array() {
+            let expr = return_stmt.value.expect("Checked in type checker");
+            let sret = self.sret;
+            let (_val, next) = self.lower_expr(expr, block_id, Some(sret));
+            self.new_inst0(Opcode::Return, next, return_stmt.span, &[]);
+            return;
+        }
+
         let (block, val) = if let Some(expr) = return_stmt.value {
             let (val, block) = self.lower_expr(expr, block_id, None);
             let val = val.read(self, block);
@@ -608,98 +623,87 @@ impl<'a> FunctionLowerer<'a> {
         } else {
             (block_id, None)
         };
-        let ret_type_id = self.function.sig.ret;
-        let ret_type = self.typectx.get_type(ret_type_id);
-        if ret_type.is_struct() || ret_type.is_array() {
-            let mem_typ = self.typectx.mem_typ();
-            let operand1 = val.expect("Should be caught in type checking");
-            let (val_id, _, _, _) = self.new_inst1(
-                Opcode::Store,
-                block,
-                return_stmt.span,
-                &[operand1, self.sret],
-                mem_typ,
-            );
 
-            self.write_variable(VarId::Mem, block, val_id);
-
-            let mem_val = self.read_variable(VarId::Mem, block);
-            self.new_inst0(Opcode::Return, block, return_stmt.span, &[mem_val]);
+        let ops = if let Some(val) = val {
+            &[val]
         } else {
-            let ops = if let Some(val) = val {
-                &[val]
-            } else {
-                &[] as &[ValueId]
-            };
-            self.new_inst0(Opcode::Return, block, return_stmt.span, ops);
-        }
+            &[] as &[ValueId]
+        };
+        self.new_inst0(Opcode::Return, block, return_stmt.span, ops);
     }
     fn lower_var_decl(
         &mut self,
         var_decl: ast::VariableDeclaration,
         block_id: BlockId,
     ) -> ControlFlow<(), BlockId> {
-        let Some(init) = var_decl.init_value else {
-            // In SSA a non-initializer variable declaration is actually just a no-op
-            return ControlFlow::Continue(block_id);
-        };
-
-        let typ_id = self.get_expr_type(init);
-        let typ = self.typectx.get_type(typ_id);
+        let ast_id = var_decl.var_type.inner;
+        let typ_id = self.ast_to_ir_type(ast_id);
+        let asttyp = self.ctx.get_type(ast_id);
 
         let varid = self.prepass.get_node_varid(var_decl.name.id);
         let var = self.prepass.get_var(varid);
         let size = self.typectx.type_size(typ_id);
         let align = self.typectx.type_align(typ_id);
 
-        if !(typ.is_struct() || typ.is_array()) {
-            if var.address_taken {
-                let slot_id = self.new_stackslot(
+        let is_aggregate = asttyp.is_array() || asttyp.is_struct();
+
+        match (is_aggregate, var_decl.init_value) {
+            (false, None) => ControlFlow::Continue(block_id),
+            (false, Some(init)) => {
+                if var.address_taken {
+                    let slot_id = self.new_stackslot(
+                        size,
+                        align,
+                        Some(var_decl.name.sym),
+                        StackSlotKind::AddressTakenLocal,
+                    );
+                    let ptr_typ = self.typectx.ptr_typ();
+                    let (var_ptr, _, val, inst) =
+                        self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
+                    inst.extra = InstExtraData::StackSlot(slot_id);
+                    val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
+
+                    let (expr, next) = self.lower_expr(init, block_id, None);
+                    let val_id = expr.read(self, next);
+
+                    Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
+                    self.write_variable(VarId::Id(varid), next, var_ptr);
+                    ControlFlow::Continue(next)
+                } else {
+                    let (expr, next) = self.lower_expr(init, block_id, None);
+                    let val_id = expr.read(self, next);
+                    let val = self.function.values.get_mut(val_id);
+                    val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
+
+                    self.write_variable(VarId::Id(varid), next, val_id);
+                    ControlFlow::Continue(next)
+                }
+            }
+            (true, init) => {
+                let stack_slot = self.new_stackslot(
                     size,
                     align,
                     Some(var_decl.name.sym),
-                    StackSlotKind::AddressTakenLocal,
+                    StackSlotKind::Aggregate,
                 );
                 let ptr_typ = self.typectx.ptr_typ();
                 let (var_ptr, _, val, inst) =
                     self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
-                inst.extra = InstExtraData::StackSlot(slot_id);
+                inst.extra = InstExtraData::StackSlot(stack_slot);
                 val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
 
-                let (expr, next) = self.lower_expr(init, block_id, None);
-                let val_id = expr.read(self, next);
+                let next = if let Some(init) = init {
+                    let (_place, next) = self.lower_expr(init, block_id, Some(var_ptr));
+                    next
+                } else {
+                    block_id
+                };
 
-                Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
                 self.write_variable(VarId::Id(varid), next, var_ptr);
-                return ControlFlow::Continue(next);
-            } else {
-                let (expr, next) = self.lower_expr(init, block_id, None);
-                let val_id = expr.read(self, next);
-                let val = self.function.values.get_mut(val_id);
-                val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
 
-                self.write_variable(VarId::Id(varid), next, val_id);
-                return ControlFlow::Continue(next);
+                ControlFlow::Continue(next)
             }
         }
-
-        let stack_slot = self.new_stackslot(
-            size,
-            align,
-            Some(var_decl.name.sym),
-            StackSlotKind::Aggregate,
-        );
-        let ptr_typ = self.typectx.ptr_typ();
-        let (var_ptr, _, val, inst) =
-            self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
-        inst.extra = InstExtraData::StackSlot(stack_slot);
-        val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
-        let (place, next) = self.lower_expr(init, block_id, Some(var_ptr));
-        // Doing this allows emitting a compilation error if rhs is an undefined struct/array
-        place.check_init(self);
-        self.write_variable(VarId::Id(varid), next, var_ptr);
-
-        ControlFlow::Continue(next)
     }
 
     fn lower_expr(
@@ -841,7 +845,7 @@ impl<'a> FunctionLowerer<'a> {
         if let Some(sptr) = sptr {
             let typ = self.ast_to_ir_type(var.typ);
             self.new_memcpy(block_id, ident.span, sptr, val, typ);
-            return (Place::ssa(sptr), block_id);
+            return (Place::ptr(sptr, ident.span, typ), block_id);
         }
         if var.address_taken {
             let typ = self.ast_to_ir_type(var.typ);
@@ -859,14 +863,10 @@ impl<'a> FunctionLowerer<'a> {
             ast::BinaryOpKind::Assign => {
                 if self.needs_sptr(binop.right) {
                     let (lhs_place, block) = self._lower_expr(binop.left, block_id, None, false);
-                    let lhs_ptr = lhs_place.get_ptr(self);
+                    let lhs_ptr = lhs_place.get_ptr();
                     // Passing the lhs_ptr as the sptr will make the children of this node copy into it
                     // effectively performing the assignment. So we don't need to do anything else but just exit.
-                    let (place, block) = self.lower_expr(binop.right, block, Some(lhs_ptr));
-
-                    // Doing this allows emitting a compilation error if rhs is an undefined struct/array
-                    place.check_init(self);
-
+                    let (_place, block) = self.lower_expr(binop.right, block, Some(lhs_ptr));
                     return (Place::ssa(lhs_ptr), block);
                 } else {
                     let (lhs_place, block) = self.lower_expr(binop.left, block_id, None);
@@ -902,11 +902,13 @@ impl<'a> FunctionLowerer<'a> {
                 self.write_variable(VarId::Id(var_id), next, f);
 
                 self.new_branch(next, binop.span, lhs, true_block, end_block);
+                self.seal_block(true_block);
 
                 let (rhs_place, next) = self.lower_expr(binop.right, true_block, None);
                 let rhs = rhs_place.read(self, next);
                 self.write_variable(VarId::Id(var_id), next, rhs);
                 self.new_jmp(next, binop.span, end_block);
+                self.seal_block(end_block);
 
                 let res = self.read_variable(VarId::Id(var_id), end_block);
                 return (Place::ssa(res), end_block);
@@ -933,11 +935,13 @@ impl<'a> FunctionLowerer<'a> {
                 self.write_variable(VarId::Id(var_id), next, t);
 
                 self.new_branch(next, binop.span, lhs, end_block, false_block);
+                self.seal_block(false_block);
 
                 let (rhs_place, next) = self.lower_expr(binop.right, false_block, None);
                 let rhs = rhs_place.read(self, next);
                 self.write_variable(VarId::Id(var_id), next, rhs);
                 self.new_jmp(next, binop.span, end_block);
+                self.seal_block(end_block);
 
                 let res = self.read_variable(VarId::Id(var_id), end_block);
                 return (Place::ssa(res), end_block);
@@ -1155,7 +1159,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             ast::PrefixOpKind::AddressOf => {
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
-                let val = place.get_ptr(self);
+                let val = place.get_ptr();
                 (Place::ssa(val), block)
             }
             ast::PrefixOpKind::Dereference => {
@@ -1261,6 +1265,8 @@ impl<'a> FunctionLowerer<'a> {
         let val_id = cond_val.read(self, block);
         // struct handling
         self.new_branch(block, ternary.span, val_id, true_block, false_block);
+        self.seal_block(true_block);
+        self.seal_block(false_block);
         let (true_val, true_next) = self.lower_expr(ternary.true_branch, true_block, sptr);
         let (false_val, false_next) = self.lower_expr(ternary.false_branch, false_block, sptr);
 
@@ -1271,6 +1277,8 @@ impl<'a> FunctionLowerer<'a> {
         let val = false_val.read(self, false_next);
         self.write_variable(VarId::Id(var_id), false_next, val);
         self.new_jmp(false_next, ternary.span, end_block);
+
+        self.seal_block(end_block);
         let val = self.read_variable(VarId::Id(var_id), end_block);
         (Place::ssa(val), end_block)
     }
@@ -1295,9 +1303,12 @@ impl<'a> FunctionLowerer<'a> {
             args.push(arg);
             block = next;
         }
-        let ast_typinfo = self.type_table[&funccall.id];
-        let ast_typ = self.ctx.get_type(ast_typinfo.id);
+
         let no_return = {
+            let expr = self.ctx.get_expr(funccall.func_expr);
+            let id = expr.id;
+            let ast_typinfo = self.type_table[&id];
+            let ast_typ = self.ctx.get_type(ast_typinfo.id);
             let ast::Type::FuncPtr { return_type, .. } = ast_typ else {
                 unreachable!()
             };
@@ -1395,9 +1406,7 @@ impl<'a> FunctionLowerer<'a> {
                     member_sym: sym,
                     field: idx as u32,
                 };
-                let (place, next) = self.lower_expr(expr, block, Some(ptr));
-                // Doing this allows emitting a compilation error if rhs is an undefined struct/array
-                place.check_init(self);
+                let (_place, next) = self.lower_expr(expr, block, Some(ptr));
                 block = next;
             } else {
                 let (val, next) = self.lower_expr(expr, block, None);
@@ -1442,9 +1451,7 @@ impl<'a> FunctionLowerer<'a> {
                     typ: elem_type,
                     forward: true,
                 };
-                let (place, next) = self.lower_expr(expr, block, Some(ptr));
-                // Doing this allows emitting a compilation error if rhs is an undefined struct/array
-                place.check_init(self);
+                let (_place, next) = self.lower_expr(expr, block, Some(ptr));
                 block = next;
             } else {
                 let (val, next) = self.lower_expr(expr, block, None);

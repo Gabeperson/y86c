@@ -1,8 +1,8 @@
 struct Something {
-    x: int,   
+    x: int,
 }
 fn main() {
-    let x: Something;
-    let y: Something;
-    x = y;
+    if (1){}
+    let x: *Something = nullptr;
+    let y: Something = *x;
 }

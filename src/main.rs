@@ -50,5 +50,6 @@ fn main() {
     for function in functions {
         let res = printer.print(&function).unwrap();
         println!("{res}");
+        println!();
     }
 }
