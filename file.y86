@@ -6,3 +6,12 @@ fn main() {
     let x: *Something = nullptr;
     let y: Something = *x;
 }
+fn foo() {
+    let v: int;
+    if (1) {
+        if (2) {
+            
+        }
+    }
+    let d: int = v;
+}

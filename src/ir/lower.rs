@@ -98,7 +98,6 @@ impl<'a> Lowerer<'a> {
             type_table: self.type_table,
             function: &mut function,
             sret: ValueId::default(),
-            errors: &mut self.errors,
             return_typ: TypeId::default(),
             struct_mapping: &mut self.struct_mapping,
             typectx: &mut self.typectx,
@@ -135,11 +134,6 @@ enum Place {
         span: Span,
         base_typ: TypeId,
     },
-    // Location that is writable to, but isn't initialized, so is not readable.
-    UndefinedSsa {
-        prepass_varid: prepass::VarId,
-        span: Span,
-    },
     // void-returning exprs
     // currently only function calls that call -> void functions.
     // These are not readable NOR writable to, just there for
@@ -162,11 +156,6 @@ impl Place {
                     lowerer.new_inst1(Opcode::Load, block, span, &[val, mem], base_typ);
                 val_id
             }
-            Place::UndefinedSsa { span, .. } => {
-                lowerer.errors.push(LoweringError::ReadUninitialized(span));
-                let void = lowerer.typectx.void_typ();
-                lowerer.function.new_undef(void, lowerer.ctx)
-            }
             Place::None => unreachable!(),
         }
     }
@@ -177,9 +166,6 @@ impl Place {
                 unreachable!()
             }
             Place::SsaAssignableVar { prepass_varid, .. } => {
-                lowerer.write_variable(VarId::Id(prepass_varid), block, val);
-            }
-            Place::UndefinedSsa { prepass_varid, .. } => {
                 lowerer.write_variable(VarId::Id(prepass_varid), block, val);
             }
             Place::Ptr { val: ptr, span, .. } => {
@@ -211,12 +197,6 @@ impl Place {
             base_typ,
         }
     }
-    fn undefined(prepass_varid: prepass::VarId, span: Span) -> Self {
-        Self::UndefinedSsa {
-            prepass_varid,
-            span,
-        }
-    }
 }
 
 #[derive(Debug)]
@@ -229,7 +209,6 @@ struct FunctionLowerer<'a> {
     sret: ValueId,
     struct_mapping: &'a mut AHashMap<Symbol, StructId>,
     typectx: &'a mut TypeContext,
-    errors: &'a mut Vec<LoweringError>,
     return_typ: TypeId,
 
     current_def: &'a mut Vec<AHashMap<VarId, ValueId>>,
@@ -391,6 +370,9 @@ impl<'a> FunctionLowerer<'a> {
                 }
             }
         }
+        let mem_typ = self.typectx.mem_typ();
+        let start_mem_val = self.function.new_undef(mem_typ, self.ctx);
+        self.write_variable(VarId::Mem, entry_block, start_mem_val);
         _ = self.lower_block(&decl.body, entry_block, None);
     }
     fn lower_block(
@@ -648,7 +630,32 @@ impl<'a> FunctionLowerer<'a> {
         let is_aggregate = asttyp.is_array() || asttyp.is_struct();
 
         match (is_aggregate, var_decl.init_value) {
-            (false, None) => ControlFlow::Continue(block_id),
+            (false, None) => {
+                // This is technically not needed, as accessing an uninitialized
+                // variable is UB, but we'll be nice and allow it and just load the zero-value.
+                // It also makes the compiler simpler so win-win situation.
+                // Plus, if they actually properly initialize the variable, this will get
+                // optimized out by the DCE pass, so no hits there.
+                let typ = self.typectx.get_type(typ_id);
+                let val = match typ {
+                    Type::I64 => self.load_const(0, block_id, var_decl.span),
+                    Type::Ptr | Type::FnPtr => {
+                        let val_id = self.load_const(0, block_id, var_decl.span);
+                        let (val_id, _, _, inst) = self.new_inst1(
+                            Opcode::BitCast,
+                            block_id,
+                            var_decl.span,
+                            &[val_id],
+                            typ_id,
+                        );
+                        inst.extra = InstExtraData::ElementType(typ_id);
+                        val_id
+                    }
+                    _ => unreachable!(),
+                };
+                self.write_variable(VarId::Id(varid), block_id, val);
+                ControlFlow::Continue(block_id)
+            }
             (false, Some(init)) => {
                 if var.address_taken {
                     let slot_id = self.new_stackslot(
@@ -839,9 +846,7 @@ impl<'a> FunctionLowerer<'a> {
                 return (Place::ptr(val_id, ident.span, typ), block_id);
             }
         }
-        let Some(val) = self._read_variable(VarId::Id(var_id), block_id) else {
-            return (Place::undefined(var_id, ident.span), block_id);
-        };
+        let val = self.read_variable(VarId::Id(var_id), block_id);
         if let Some(sptr) = sptr {
             let typ = self.ast_to_ir_type(var.typ);
             self.new_memcpy(block_id, ident.span, sptr, val, typ);
@@ -1835,22 +1840,17 @@ impl<'a> FunctionLowerer<'a> {
         let block = block.get() as usize;
         self.current_def[block].insert(var, value);
     }
-    #[track_caller]
     fn read_variable(&mut self, var: VarId, block: BlockId) -> ValueId {
-        self._read_variable(var, block)
-            .expect("Internal Compiler Error")
-    }
-    fn _read_variable(&mut self, var: VarId, block: BlockId) -> Option<ValueId> {
         if let Some(val) = self.current_def[block.get() as usize].get(&var) {
-            return Some(self.resolve_alias(*val));
+            return self.resolve_alias(*val);
         }
         self.read_variable_recursive(var, block)
     }
-    fn read_variable_recursive(&mut self, var: VarId, block_id: BlockId) -> Option<ValueId> {
+    fn read_variable_recursive(&mut self, var: VarId, block_id: BlockId) -> ValueId {
         {
             let block = self.function.blocks.get(block_id);
             if block.preds.is_empty() {
-                return None;
+                panic!("Internal compiler error");
             }
         }
         let val = if !self.block_sealed(block_id) {
@@ -1869,7 +1869,7 @@ impl<'a> FunctionLowerer<'a> {
             self.add_phi_operands(var, block_id, val)
         };
         self.write_variable(var, block_id, val);
-        Some(val)
+        val
     }
     fn add_phi_operands(&mut self, var: VarId, block_id: BlockId, phi_id: ValueId) -> ValueId {
         let block = self.function.blocks.get(block_id);
@@ -1951,9 +1951,7 @@ impl<'a> FunctionLowerer<'a> {
         elem_typ: TypeId,
     ) {
         let mem_typ = self.typectx.mem_typ();
-        let mem_val = self
-            ._read_variable(VarId::Mem, block)
-            .unwrap_or_else(|| self.function.new_undef(mem_typ, self.ctx));
+        let mem_val = self.read_variable(VarId::Mem, block);
         let (val_id, _, _, inst) =
             self.new_inst1(Opcode::Memcpy, block, span, &[to, from, mem_val], mem_typ);
         inst.extra = InstExtraData::ElementType(elem_typ);
@@ -2001,12 +1999,28 @@ impl Function {
         self.blocks.get_mut(block_id).insts.push(inst_id);
         val_id
     }
+    // replaces any users that use this, then removes the defining
+    // phi instruction as well.
     fn replace_value(&mut self, from: ValueId, to: ValueId) {
         let val = self.values.get(from);
         let uses = val.uses.clone();
         for user in uses {
             self.replace_inst_value(user, from, to);
         }
+        self.remove_phi_inst(from);
+    }
+    fn remove_phi_inst(&mut self, phi: ValueId) {
+        let val = self.values.get(phi);
+        let inst_id = val.inst;
+        let inst = self.insts.get(inst_id);
+        let block_id = inst.block;
+        let block = self.blocks.get_mut(block_id);
+        let idx = block
+            .insts
+            .iter()
+            .position(|&i| i == inst_id)
+            .expect("Should only be called for phi insts that exist");
+        block.insts.remove(idx);
     }
     fn replace_inst_value(&mut self, inst_id: InstId, from: ValueId, to: ValueId) {
         let inst = self.insts.get_mut(inst_id);
