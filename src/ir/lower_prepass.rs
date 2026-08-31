@@ -278,6 +278,7 @@ impl LoweringPrepass<'_> {
             }
             ExprKind::CopyProvenance(copy_provenance) => {
                 self.visit_expr(copy_provenance.prov_ptr, false);
+                self.visit_expr(copy_provenance.addr, false);
             }
             ExprKind::ExposeProvenance(expose_provenance) => {
                 self.visit_expr(expose_provenance.ptr, false);

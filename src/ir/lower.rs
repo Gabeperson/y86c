@@ -619,10 +619,14 @@ impl<'a> FunctionLowerer<'a> {
                 // optimized out by the DCE pass, so no hits there.
                 let typ = self.typectx.get_type(typ_id);
                 let val = match typ {
-                    Type::I64 => self.load_const(0, block_id, var_decl.span),
+                    Type::I64 => {
+                        let (val_id, val) = self.load_const(0, block_id, var_decl.span);
+                        val.dbg_name = Some(var_decl.name.sym);
+                        val_id
+                    }
                     Type::Ptr | Type::FnPtr => {
-                        let val_id = self.load_const(0, block_id, var_decl.span);
-                        let (val_id, _, _, inst) = self.new_inst1(
+                        let (val_id, _) = self.load_const(0, block_id, var_decl.span);
+                        let (val_id, _, val, inst) = self.new_inst1(
                             Opcode::BitCast,
                             block_id,
                             var_decl.span,
@@ -630,6 +634,7 @@ impl<'a> FunctionLowerer<'a> {
                             typ_id,
                         );
                         inst.extra = InstExtraData::ElementType(typ_id);
+                        val.dbg_name = Some(var_decl.name.sym);
                         val_id
                     }
                     _ => unreachable!(),
@@ -711,7 +716,7 @@ impl<'a> FunctionLowerer<'a> {
         // sometimes we want to call this with no sptr with an expression that has a
         // "return type" of a struct. If we do this regularly, the lower_expr will think
         // this is an "intermediate aggregate access" and will generate an sptr.
-        // But sometimes we don't want this, like in the case of assignment of structs.
+        // But sometimes we don't want this, like when we want the location of a struct we wish to write to.
         // when the ExprStmt is lowered, it would generate a stackslot which is unneeded and unused
         // and also when trying to assign to an ident that is undefined that is also a struct/array.
         // This arg is here to prevent that in these cases.
@@ -787,7 +792,7 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
     fn lower_nullptr(&mut self, nullptr: ast::Nullptr, block_id: BlockId) -> (Place, BlockId) {
-        let val_id = self.load_const(0, block_id, nullptr.span);
+        let (val_id, _) = self.load_const(0, block_id, nullptr.span);
 
         let typ = self.typectx.ptr_typ();
         let (val_id, _, _, inst) =
@@ -841,7 +846,7 @@ impl<'a> FunctionLowerer<'a> {
         }
     }
     fn lower_int(&mut self, int: ast::Int, block_id: BlockId) -> (Place, BlockId) {
-        let val_id = self.load_const(int.lit, block_id, int.span);
+        let (val_id, _) = self.load_const(int.lit, block_id, int.span);
         (Place::ssa(val_id), block_id)
     }
     fn lower_binary_op(&mut self, binop: ast::BinaryOp, block_id: BlockId) -> (Place, BlockId) {
@@ -884,8 +889,7 @@ impl<'a> FunctionLowerer<'a> {
                 let (lhs_place, next) = self.lower_expr(binop.left, block_id, None);
                 let lhs = lhs_place.read(self, next);
 
-                let f = self.load_const(0, next, binop.span);
-                self.write_variable(VarId::Id(var_id), next, f);
+                self.write_variable(VarId::Id(var_id), next, lhs);
 
                 self.new_branch(next, binop.span, lhs, true_block, end_block);
                 self.seal_block(true_block);
@@ -917,8 +921,7 @@ impl<'a> FunctionLowerer<'a> {
                 let (lhs_place, next) = self.lower_expr(binop.left, block_id, None);
                 let lhs = lhs_place.read(self, next);
 
-                let t = self.load_const(1, next, binop.span);
-                self.write_variable(VarId::Id(var_id), next, t);
+                self.write_variable(VarId::Id(var_id), next, lhs);
 
                 self.new_branch(next, binop.span, lhs, end_block, false_block);
                 self.seal_block(false_block);
@@ -1004,7 +1007,7 @@ impl<'a> FunctionLowerer<'a> {
                     if base_size == 1 {
                         (Place::ssa(raw_sub), block)
                     } else {
-                        let base_size = self.load_const(base_size, block, binop.span);
+                        let (base_size, _) = self.load_const(base_size, block, binop.span);
                         let (res, _, _, _) = self.new_inst1(
                             Opcode::Div,
                             block,
@@ -1058,7 +1061,7 @@ impl<'a> FunctionLowerer<'a> {
                 Type::I64 => {
                     let typ = self.typectx.i64_typ();
                     let (val_id, _, _, _) = self.new_inst1(
-                        if binop.kind == ast::BinaryOpKind::Add {
+                        if binop.kind == ast::BinaryOpKind::AddAssign {
                             Opcode::Add
                         } else {
                             Opcode::Sub
@@ -1078,7 +1081,7 @@ impl<'a> FunctionLowerer<'a> {
                         self.new_inst1(Opcode::IndexAddr, block, binop.span, &[lhs, rhs], typ);
                     inst.extra = InstExtraData::IndexAddrData {
                         typ: pointee_type,
-                        forward: binop.kind == ast::BinaryOpKind::Add,
+                        forward: binop.kind == ast::BinaryOpKind::AddAssign,
                     };
                     (Place::ssa(val_id), block)
                 }
@@ -1097,7 +1100,7 @@ impl<'a> FunctionLowerer<'a> {
                 let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
                 let val = place.read(self, block);
                 let expr_type = self.get_expr_type(prefixop.expr);
-                let one = self.load_const(1, block, prefixop.span);
+                let (one, _) = self.load_const(1, block, prefixop.span);
                 let typ = self.typectx.get_type(expr_type);
                 let val_id = match typ {
                     Type::I64 => {
@@ -1185,7 +1188,7 @@ impl<'a> FunctionLowerer<'a> {
         let (place, block) = self.lower_expr(postfixop.expr, block_id, None);
         let original_val = place.read(self, block);
         let expr_type = self.get_expr_type(postfixop.expr);
-        let one = self.load_const(1, block, postfixop.span);
+        let (one, _) = self.load_const(1, block, postfixop.span);
         let typ = self.typectx.get_type(expr_type);
         let val_id = match typ {
             Type::I64 => {
@@ -1320,6 +1323,7 @@ impl<'a> FunctionLowerer<'a> {
                 (Place::None, block)
             }
         } else {
+            // TODO provenance for ptr return
             let typ = self.get_expr_type(expr_id);
             let (val_id, _, _, inst) =
                 self.new_inst1(Opcode::IndirectCall, block, funccall.span, &args, typ);
@@ -1369,7 +1373,7 @@ impl<'a> FunctionLowerer<'a> {
         let typ = self.ast_to_ir_type(size_of_type.typ.inner);
         let size = self.typectx.type_size(typ);
         let size: i64 = size.try_into().expect("Bigger than i64 size... why???");
-        let constant = self.load_const(size, block_id, size_of_type.span);
+        let (constant, _) = self.load_const(size, block_id, size_of_type.span);
         (Place::ssa(constant), block_id)
     }
     fn lower_struct_init(
@@ -1432,7 +1436,7 @@ impl<'a> FunctionLowerer<'a> {
         let ptr_typ = self.typectx.ptr_typ();
         for (index, expr) in array_init.elements.into_iter().enumerate() {
             if self.needs_sptr(expr) {
-                let num = self.load_const(index as i64, block, array_init.span);
+                let (num, _) = self.load_const(index as i64, block, array_init.span);
                 let (ptr, _, _, inst) = self.new_inst1(
                     Opcode::IndexAddr,
                     block,
@@ -1449,7 +1453,7 @@ impl<'a> FunctionLowerer<'a> {
             } else {
                 let (val, next) = self.lower_expr(expr, block, None);
                 let val = val.read(self, next);
-                let num = self.load_const(index as i64, next, array_init.span);
+                let (num, _) = self.load_const(index as i64, next, array_init.span);
                 let (ptr, _, _, inst) = self.new_inst1(
                     Opcode::IndexAddr,
                     next,
@@ -1776,11 +1780,11 @@ impl<'a> FunctionLowerer<'a> {
         self.function.blocks.get_mut(block).insts.push(inst_id);
         (inst_id, inst)
     }
-    fn load_const(&mut self, int: i64, block: BlockId, span: Span) -> ValueId {
+    fn load_const(&mut self, int: i64, block: BlockId, span: Span) -> (ValueId, &mut Value) {
         let typ = self.typectx.i64_typ();
-        let (val_id, _, _, inst) = self.new_inst1(Opcode::LoadConst, block, span, &[], typ);
+        let (val_id, _, val, inst) = self.new_inst1(Opcode::LoadConst, block, span, &[], typ);
         inst.extra = InstExtraData::ConstInt(int);
-        val_id
+        (val_id, val)
     }
     fn connect1(&mut self, from_id: BlockId, to_id: BlockId) {
         let from = self.function.blocks.get_mut(from_id);

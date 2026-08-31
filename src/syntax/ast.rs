@@ -395,6 +395,8 @@ impl BinaryOpKind {
                 | BinaryOpKind::XorAssign
                 | BinaryOpKind::ModAssign
                 | BinaryOpKind::Assign
+                | BinaryOpKind::ShlAssign
+                | BinaryOpKind::ShrAssign
         )
     }
 }

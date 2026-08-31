@@ -1,15 +1,12 @@
-struct b {
-    a: [int; 2],
-}
-struct a {
-    a: int,
-}
-struct Something {
-    x: [a; 1],
+struct Foo {
+    foo: *int,
 }
 fn main() {
-    let x: Something = Something {
-        x: [a {a: 1}]
-    };
-}
+    //let x: int;
+    //// addr of taken x with uninitialized issue?
+    //assert(&x);
 
+    let x: int;
+    assert(~x);
+}
+ 
