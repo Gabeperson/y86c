@@ -1,17 +1,15 @@
+struct b {
+    a: [int; 2],
+}
+struct a {
+    a: int,
+}
 struct Something {
-    x: int,
+    x: [a; 1],
 }
 fn main() {
-    if (1){}
-    let x: *Something = nullptr;
-    let y: Something = *x;
+    let x: Something = Something {
+        x: [a {a: 1}]
+    };
 }
-fn foo() {
-    let v: int;
-    if (1) {
-        if (2) {
-            
-        }
-    }
-    let d: int = v;
-}
+

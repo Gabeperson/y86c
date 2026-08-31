@@ -2,6 +2,12 @@ fn u_void() {}
 fn u_fn1(x: int) -> int {}
 fn u_fn2(x: *int) -> *int {}
 fn u_fn3(x: *void) -> *void {}
+
+@[cc(internal)]
+fn u_nonsys() {}
+@[cc(abi)]
+fn u_sys() {}
+
 struct Struct {x: int}
 struct BigStruct {
     a: int,
@@ -599,3 +605,12 @@ fn i_copy_prov() { let a: *void = copy_prov(1, 1); }
 fn i_copy_prov() { let a: *void = copy_prov(nullptr, nullptr); }
 fn i_copy_prov() { let a: int = copy_prov(nullptr, 1); }
 
+fn v_fnptrkinds() { let a: fn() = nullptr as fn(); }
+fn v_fnptrkinds() { let a: fn_sys() = nullptr as fn_sys(); }
+fn i_fnptrkinds() { let a: fn_sys() = nullptr as fn(); }
+fn i_fnptrkinds() { let a: fn() = nullptr as fn_sys(); }
+
+fn v_fnptrkinds() { let a: fn() = u_nonsys; }
+fn v_fnptrkinds() { let a: fn_sys() = u_sys; }
+fn i_fnptrkinds() { let a: fn() = u_sys; }
+fn i_fnptrkinds() { let a: fn_sys() = u_nonsys; }

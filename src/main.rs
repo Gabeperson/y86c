@@ -40,11 +40,7 @@ fn main() {
     let type_table = type_check_res.type_table;
     let mut prepass = LoweringPrepass::run(&program, &ctx, &symbol_table);
     let lowerer = Lowerer::new(&mut prepass, &symbol_table, &mut ctx, &type_table);
-    let (typectx, functions, errors) = lowerer.lower(&program);
-    if !errors.is_empty() {
-        dbg!(errors);
-        std::process::exit(1);
-    }
+    let (typectx, functions) = lowerer.lower(&program);
 
     let printer = IrPrinter::new(&typectx, &ctx.symbol_interner);
     for function in functions {

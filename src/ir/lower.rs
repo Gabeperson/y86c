@@ -14,11 +14,6 @@ use crate::syntax::ast::{self, NodeId};
 use crate::syntax::context::{Context, ExprId, StmtId};
 
 #[derive(Debug)]
-pub enum LoweringError {
-    ReadUninitialized(Span),
-}
-
-#[derive(Debug)]
 pub struct Lowerer<'a> {
     prepass: &'a mut LoweringPrepassOutput,
     functions: Vec<Function>,
@@ -27,7 +22,6 @@ pub struct Lowerer<'a> {
     type_table: &'a AHashMap<NodeId, ExprTypeInfo>,
     typectx: TypeContext,
     struct_mapping: AHashMap<Symbol, StructId>,
-    errors: Vec<LoweringError>,
 
     current_def: Vec<AHashMap<VarId, ValueId>>,
     incomplete_phis: Vec<AHashMap<VarId, ValueId>>,
@@ -48,7 +42,6 @@ impl<'a> Lowerer<'a> {
             symbol_table,
             ctx,
             type_table,
-            errors: Vec::new(),
             struct_mapping: AHashMap::new(),
             typectx: TypeContext::new(),
             current_def: Vec::new(),
@@ -57,16 +50,13 @@ impl<'a> Lowerer<'a> {
             aliases: AHashMap::new(),
         }
     }
-    pub fn lower(
-        mut self,
-        program: &ast::Program,
-    ) -> (TypeContext, Vec<Function>, Vec<LoweringError>) {
+    pub fn lower(mut self, program: &ast::Program) -> (TypeContext, Vec<Function>) {
         for decl in &program.decls {
             if let ast::GlobalDeclarationKind::Function(func) = &decl.kind {
                 self.lower_function(func);
             }
         }
-        (self.typectx, self.functions, self.errors)
+        (self.typectx, self.functions)
     }
     fn lower_function(&mut self, decl: &ast::FunctionDeclaration) {
         let mut function = Function {
@@ -142,6 +132,7 @@ enum Place {
 }
 
 impl Place {
+    #[track_caller]
     fn read(self, lowerer: &mut FunctionLowerer, block: BlockId) -> ValueId {
         match self {
             Place::SsaVar { val } => val,
@@ -150,12 +141,7 @@ impl Place {
                 val,
                 span,
                 base_typ,
-            } => {
-                let mem = lowerer.read_variable(VarId::Mem, block);
-                let (val_id, _, _, _) =
-                    lowerer.new_inst1(Opcode::Load, block, span, &[val, mem], base_typ);
-                val_id
-            }
+            } => lowerer.new_load(block, span, val, base_typ),
             Place::None => unreachable!(),
         }
     }
@@ -169,10 +155,7 @@ impl Place {
                 lowerer.write_variable(VarId::Id(prepass_varid), block, val);
             }
             Place::Ptr { val: ptr, span, .. } => {
-                let mem = lowerer.typectx.mem_typ();
-                let (val_id, _, _, _) =
-                    lowerer.new_inst1(Opcode::Store, block, span, &[val, ptr], mem);
-                lowerer.write_variable(VarId::Mem, block, val_id);
+                lowerer.new_store(block, span, val, ptr);
             }
             Place::None => unreachable!(),
         }
@@ -250,10 +233,13 @@ impl<'a> FunctionLowerer<'a> {
                 });
                 self.typectx.void_typ()
             } else {
+                self.return_typ = typ_id;
                 typ_id
             }
         } else {
-            self.typectx.void_typ()
+            let void = self.typectx.void_typ();
+            self.return_typ = void;
+            void
         };
         self.function.sig.ret = ret_id;
 
@@ -317,16 +303,7 @@ impl<'a> FunctionLowerer<'a> {
                     inst.extra = InstExtraData::StackSlot(slot_id);
                     val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
 
-                    let mem_typ = self.typectx.mem_typ();
-                    let (val_id, _, _, _) = self.new_inst1(
-                        Opcode::Store,
-                        entry_block,
-                        name.span,
-                        &[val_id, ptr],
-                        mem_typ,
-                    );
-
-                    self.write_variable(VarId::Mem, entry_block, val_id);
+                    self.new_store(entry_block, name.span, val_id, ptr);
 
                     let prov = self
                         .function
@@ -416,8 +393,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.lower_var_decl(*var_decl, block_id)
             }
             ast::StmtKind::Expr(expr_id) => {
-                let (place, next) = self._lower_expr(*expr_id, block_id, None, false);
-                place.read(self, next);
+                let (_place, next) = self._lower_expr(*expr_id, block_id, None, false);
                 ControlFlow::Continue(next)
             }
         }
@@ -584,8 +560,13 @@ impl<'a> FunctionLowerer<'a> {
             self.new_jmp(post_end_block, for_loop.span, start_block);
         }
         self.seal_block(start_block);
-        self.seal_block(end_block);
-        ControlFlow::Continue(end_block)
+        let uses_end = !self.function.blocks.get(end_block).preds.is_empty();
+        if uses_end {
+            self.seal_block(end_block);
+            ControlFlow::Continue(end_block)
+        } else {
+            ControlFlow::Break(())
+        }
     }
     fn lower_return(&mut self, return_stmt: ast::ReturnStmt, block_id: BlockId) {
         let ret_type_id = self.return_typ;
@@ -633,7 +614,7 @@ impl<'a> FunctionLowerer<'a> {
             (false, None) => {
                 // This is technically not needed, as accessing an uninitialized
                 // variable is UB, but we'll be nice and allow it and just load the zero-value.
-                // It also makes the compiler simpler so win-win situation.
+                // It also makes us not need to worry about dealing with "undefined places".
                 // Plus, if they actually properly initialize the variable, this will get
                 // optimized out by the DCE pass, so no hits there.
                 let typ = self.typectx.get_type(typ_id);
@@ -1163,7 +1144,7 @@ impl<'a> FunctionLowerer<'a> {
                 (Place::ssa(val_id), block)
             }
             ast::PrefixOpKind::AddressOf => {
-                let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
+                let (place, block) = self._lower_expr(prefixop.expr, block_id, None, false);
                 let val = place.get_ptr();
                 (Place::ssa(val), block)
             }
@@ -1309,21 +1290,30 @@ impl<'a> FunctionLowerer<'a> {
             block = next;
         }
 
-        let no_return = {
+        let (no_return, callkind) = {
             let expr = self.ctx.get_expr(funccall.func_expr);
             let id = expr.id;
             let ast_typinfo = self.type_table[&id];
             let ast_typ = self.ctx.get_type(ast_typinfo.id);
-            let ast::Type::FuncPtr { return_type, .. } = ast_typ else {
+            let ast::Type::FuncPtr {
+                return_type, kind, ..
+            } = ast_typ
+            else {
                 unreachable!()
             };
             let typ = self.ctx.get_type(*return_type);
             // If void, then obv no return value
             // if struct or array, sret is used so no return value.
-            typ.is_void() || typ.is_struct() || typ.is_array()
+            let noreturn = typ.is_void() || typ.is_struct() || typ.is_array();
+            let callkind = match kind {
+                ast::FnPtrKind::Internal => CallKind::Internal,
+                ast::FnPtrKind::Abi => CallKind::Abi,
+            };
+            (noreturn, callkind)
         };
         if no_return {
-            self.new_inst0(Opcode::IndirectCall, block, funccall.span, &args);
+            let (_, inst) = self.new_inst0(Opcode::IndirectCall, block, funccall.span, &args);
+            inst.extra = InstExtraData::ICallKind(callkind);
             if let Some(sptr) = sptr {
                 (Place::ssa(sptr), block)
             } else {
@@ -1331,8 +1321,9 @@ impl<'a> FunctionLowerer<'a> {
             }
         } else {
             let typ = self.get_expr_type(expr_id);
-            let (val_id, _, _, _) =
+            let (val_id, _, _, inst) =
                 self.new_inst1(Opcode::IndirectCall, block, funccall.span, &args, typ);
+            inst.extra = InstExtraData::ICallKind(callkind);
             (Place::ssa(val_id), block)
         }
     }
@@ -1342,8 +1333,8 @@ impl<'a> FunctionLowerer<'a> {
         block_id: BlockId,
         sptr: Option<ValueId>,
     ) -> (Place, BlockId) {
-        let (ptr_place, block) = self.lower_expr(arrayindex.array, block_id, None);
-        let ptr = ptr_place.read(self, block);
+        let (ptr_place, block) = self._lower_expr(arrayindex.array, block_id, None, false);
+        let ptr = ptr_place.get_ptr();
         let (index_place, block) = self.lower_expr(arrayindex.index, block, None);
         let index = index_place.read(self, block);
         let pointee_typ = self.get_expr_pointee_type(arrayindex.array);
@@ -1424,10 +1415,7 @@ impl<'a> FunctionLowerer<'a> {
                     member_sym: sym,
                     field: idx as u32,
                 };
-                let mem = self.typectx.mem_typ();
-                let (mem_id, _, _, _) =
-                    self.new_inst1(Opcode::Store, next, struct_init.span, &[val, ptr], mem);
-                self.write_variable(VarId::Mem, next, mem_id);
+                self.new_store(next, struct_init.span, val, ptr);
                 block = next;
             }
         }
@@ -1474,10 +1462,7 @@ impl<'a> FunctionLowerer<'a> {
                     forward: true,
                 };
 
-                let mem = self.typectx.mem_typ();
-                let (mem_id, _, _, _) =
-                    self.new_inst1(Opcode::Store, next, array_init.span, &[val, ptr], mem);
-                self.write_variable(VarId::Mem, next, mem_id);
+                self.new_store(next, array_init.span, val, ptr);
                 block = next;
             }
         }
@@ -1507,8 +1492,8 @@ impl<'a> FunctionLowerer<'a> {
 
         let ptr_typ = self.typectx.ptr_typ();
 
-        let (place, block) = self.lower_expr(member_access.struct_expr, block_id, None);
-        let ptr = place.read(self, block);
+        let (place, block) = self._lower_expr(member_access.struct_expr, block_id, None, false);
+        let ptr = place.get_ptr();
 
         let struct_id = self.get_structid(name);
         let (field_ptr, _, _, inst) = self.new_inst1(
@@ -1840,12 +1825,14 @@ impl<'a> FunctionLowerer<'a> {
         let block = block.get() as usize;
         self.current_def[block].insert(var, value);
     }
+    #[track_caller]
     fn read_variable(&mut self, var: VarId, block: BlockId) -> ValueId {
         if let Some(val) = self.current_def[block.get() as usize].get(&var) {
             return self.resolve_alias(*val);
         }
         self.read_variable_recursive(var, block)
     }
+    #[track_caller]
     fn read_variable_recursive(&mut self, var: VarId, block_id: BlockId) -> ValueId {
         {
             let block = self.function.blocks.get(block_id);
@@ -1967,6 +1954,18 @@ impl<'a> FunctionLowerer<'a> {
         };
         *id
     }
+    fn new_store(&mut self, block: BlockId, span: Span, val: ValueId, into: ValueId) {
+        let mem_sym = self.ctx.intern_symbol("mem");
+        let mem_typ = self.typectx.mem_typ();
+        let (val_id, _, val, _) = self.new_inst1(Opcode::Store, block, span, &[val, into], mem_typ);
+        val.dbg_name = Some(mem_sym);
+        self.write_variable(VarId::Mem, block, val_id)
+    }
+    fn new_load(&mut self, block: BlockId, span: Span, from: ValueId, typ: TypeId) -> ValueId {
+        let mem = self.read_variable(VarId::Mem, block);
+        let (val_id, _, _, _) = self.new_inst1(Opcode::Load, block, span, &[from, mem], typ);
+        val_id
+    }
 }
 
 impl Function {
@@ -1996,7 +1995,7 @@ impl Function {
         let val = Value::new(typ, inst_id, 0, None);
         let val_id = self.values.intern(val);
         inst.results.push(val_id);
-        self.blocks.get_mut(block_id).insts.push(inst_id);
+        self.blocks.get_mut(block_id).insts.insert(0, inst_id);
         val_id
     }
     // replaces any users that use this, then removes the defining

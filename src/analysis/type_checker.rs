@@ -528,6 +528,7 @@ impl<'a> TypeChecker<'a> {
         let Type::FuncPtr {
             return_type,
             param_types,
+            kind: _,
         } = typ
         else {
             self.errors.push(TypeCheckError::FunctionCallOnNonFnPtr {
@@ -854,7 +855,9 @@ impl<'a> TypeChecker<'a> {
             pointee: void,
             noalias: false,
         });
-        Some(ExprTypeInfo::new(typ, false))
+        let expr_type_info = ExprTypeInfo::new(typ, false);
+        self.type_table.insert(copy_prov.id, expr_type_info);
+        Some(expr_type_info)
     }
     fn check_expose_prov(&mut self, expose_prov: ExposeProvenance) -> Option<ExprTypeInfo> {
         let ptr = self.check_expr(expose_prov.ptr)?;
@@ -867,7 +870,9 @@ impl<'a> TypeChecker<'a> {
             });
         }
         let typ = self.ctx.intern_type(Type::Int);
-        Some(ExprTypeInfo::new(typ, false))
+        let expr_type_info = ExprTypeInfo::new(typ, false);
+        self.type_table.insert(expose_prov.id, expr_type_info);
+        Some(expr_type_info)
     }
     fn check_unexpose_prov(&mut self, unexpose_prov: UnexposeProvenance) -> Option<ExprTypeInfo> {
         let int = self.check_expr(unexpose_prov.int)?;
@@ -884,7 +889,9 @@ impl<'a> TypeChecker<'a> {
             pointee: void,
             noalias: false,
         });
-        Some(ExprTypeInfo::new(typ, false))
+        let expr_type_info = ExprTypeInfo::new(typ, false);
+        self.type_table.insert(unexpose_prov.id, expr_type_info);
+        Some(expr_type_info)
     }
     fn check_new_prov(&mut self, new_prov: NewProvenance) -> Option<ExprTypeInfo> {
         let ptr = self.check_expr(new_prov.ptr)?;
@@ -901,7 +908,9 @@ impl<'a> TypeChecker<'a> {
             pointee: void,
             noalias: true,
         });
-        Some(ExprTypeInfo::new(typ, false))
+        let expr_type_info = ExprTypeInfo::new(typ, false);
+        self.type_table.insert(new_prov.id, expr_type_info);
+        Some(expr_type_info)
     }
 
     fn check_type(&mut self, typ: TypeId, span: Span) -> Option<()> {
@@ -922,6 +931,7 @@ impl<'a> TypeChecker<'a> {
             Type::FuncPtr {
                 return_type,
                 param_types,
+                kind: _,
             } => {
                 let return_type = *return_type;
                 let param_types = param_types.clone();
@@ -1293,12 +1303,17 @@ impl Type {
                 Type::FuncPtr {
                     return_type: r1,
                     param_types: p1,
+                    kind: k1,
                 },
                 Type::FuncPtr {
                     return_type: r2,
                     param_types: p2,
+                    kind: k2,
                 },
             ) => {
+                if k1 != k2 {
+                    return false;
+                }
                 if p1.len() != p2.len() {
                     return false;
                 }

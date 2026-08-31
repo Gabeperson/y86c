@@ -389,7 +389,14 @@ impl<'t> Parser<'t> {
             match token.kind {
                 TokenKind::Semicolon => {
                     self.advance();
-                    return Ok(());
+                    match self.current()?.kind {
+                        TokenKind::RParen | TokenKind::RSquare | TokenKind::Semicolon => {
+                            self.advance();
+                        }
+                        _ => {
+                            return Ok(());
+                        }
+                    }
                 }
                 TokenKind::RCurly => return Ok(()),
                 _ => self.advance(),
@@ -416,7 +423,8 @@ impl<'t> Parser<'t> {
                 self.advance();
                 Ok((Type::Int, token.span))
             }
-            TokenKind::Keyword(KeywordKind::Fn) => {
+            TokenKind::Keyword(kind @ KeywordKind::Fn)
+            | TokenKind::Keyword(kind @ KeywordKind::FnSys) => {
                 self.advance();
                 self.expect(
                     TokenKind::LParen,
@@ -451,6 +459,11 @@ impl<'t> Parser<'t> {
                     Type::FuncPtr {
                         return_type,
                         param_types,
+                        kind: match kind {
+                            KeywordKind::Fn => FnPtrKind::Internal,
+                            KeywordKind::FnSys => FnPtrKind::Abi,
+                            _ => unreachable!(),
+                        },
                     },
                     span,
                 ))
@@ -1517,7 +1530,7 @@ mod tests {
                 id: NodeId(1),
             }
         }
-        pub fn func_ptr(param_types: Vec<Type>, return_type: Type) -> Type {
+        pub fn func_ptr(param_types: Vec<Type>, return_type: Type, kind: FnPtrKind) -> Type {
             let mut v = TinyVec::new();
             let ctx = &mut ctx();
             for i in param_types {
@@ -1526,6 +1539,7 @@ mod tests {
             let return_type = ctx.intern_type(return_type);
             Type::FuncPtr {
                 return_type,
+                kind,
                 param_types: v,
             }
         }
@@ -2091,10 +2105,35 @@ mod tests {
         compare_types("[Something; 1]", array(struct_(ident("Something")), 1));
         compare_types("[int; 2555555]", array(int(), 2555555));
         compare_types("**Something", ptr(ptr(struct_(ident("Something")))));
-        compare_types("fn()", func_ptr(Vec::new(), Type::Void));
-        compare_types("fn()->void", func_ptr(Vec::new(), Type::Void));
-        compare_types("*fn()", ptr(func_ptr(Vec::new(), Type::Void)));
-        compare_types("fn(int)", func_ptr(vec![int()], Type::Void));
+        compare_types(
+            "fn()",
+            func_ptr(Vec::new(), Type::Void, FnPtrKind::Internal),
+        );
+        compare_types(
+            "fn()->void",
+            func_ptr(Vec::new(), Type::Void, FnPtrKind::Internal),
+        );
+        compare_types(
+            "*fn()",
+            ptr(func_ptr(Vec::new(), Type::Void, FnPtrKind::Internal)),
+        );
+        compare_types(
+            "fn(int)",
+            func_ptr(vec![int()], Type::Void, FnPtrKind::Internal),
+        );
+        compare_types("fn_sys()", func_ptr(Vec::new(), Type::Void, FnPtrKind::Abi));
+        compare_types(
+            "fn_sys()->void",
+            func_ptr(Vec::new(), Type::Void, FnPtrKind::Abi),
+        );
+        compare_types(
+            "*fn_sys()",
+            ptr(func_ptr(Vec::new(), Type::Void, FnPtrKind::Abi)),
+        );
+        compare_types(
+            "fn_sys(int)",
+            func_ptr(vec![int()], Type::Void, FnPtrKind::Abi),
+        );
         compare_types("noalias *int", noalias_ptr(int()));
         compare_types("noalias * noalias *int", noalias_ptr(noalias_ptr(int())));
         compare_types("noalias *void", noalias_ptr(void()));
@@ -2106,16 +2145,24 @@ mod tests {
         compare_types("noalias **int", noalias_ptr(ptr(int())));
         compare_types("* noalias *int", ptr(noalias_ptr(int())));
 
-        compare_types("fn(int, int) -> int", func_ptr(vec![int(), int()], int()));
+        compare_types(
+            "fn(int, int) -> int",
+            func_ptr(vec![int(), int()], int(), FnPtrKind::Internal),
+        );
         compare_types(
             "fn(int, int) -> SomeStruct",
-            func_ptr(vec![int(), int()], struct_(ident("SomeStruct"))),
+            func_ptr(
+                vec![int(), int()],
+                struct_(ident("SomeStruct")),
+                FnPtrKind::Internal,
+            ),
         );
         compare_types(
             "fn(int, int) -> ***SomeStruct",
             func_ptr(
                 vec![int(), int()],
                 ptr(ptr(ptr(struct_(ident("SomeStruct"))))),
+                FnPtrKind::Internal,
             ),
         );
         compare_types(
@@ -2126,26 +2173,41 @@ mod tests {
                     struct_(ident("SomeOtherStruct")),
                 ],
                 struct_(ident("SomeStruct")),
+                FnPtrKind::Internal,
             ),
         );
         compare_types(
             "fn(int, int) -> fn(int, int) -> int",
-            func_ptr(vec![int(), int()], func_ptr(vec![int(), int()], int())),
+            func_ptr(
+                vec![int(), int()],
+                func_ptr(vec![int(), int()], int(), FnPtrKind::Internal),
+                FnPtrKind::Internal,
+            ),
         );
         compare_types(
             "fn(fn(int, int) -> fn(int, int) -> int, fn(fn(int, int) -> fn(int, int) -> int, int) -> fn(int, int) -> int) -> fn(int, int) -> int",
             func_ptr(
                 vec![
-                    func_ptr(vec![int(), int()], func_ptr(vec![int(), int()], int())),
+                    func_ptr(
+                        vec![int(), int()],
+                        func_ptr(vec![int(), int()], int(), FnPtrKind::Internal),
+                        FnPtrKind::Internal,
+                    ),
                     func_ptr(
                         vec![
-                            func_ptr(vec![int(), int()], func_ptr(vec![int(), int()], int())),
+                            func_ptr(
+                                vec![int(), int()],
+                                func_ptr(vec![int(), int()], int(), FnPtrKind::Internal),
+                                FnPtrKind::Internal,
+                            ),
                             int(),
                         ],
-                        func_ptr(vec![int(), int()], int()),
+                        func_ptr(vec![int(), int()], int(), FnPtrKind::Internal),
+                        FnPtrKind::Internal,
                     ),
                 ],
-                func_ptr(vec![int(), int()], int()),
+                func_ptr(vec![int(), int()], int(), FnPtrKind::Internal),
+                FnPtrKind::Internal,
             ),
         );
     }

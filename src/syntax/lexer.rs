@@ -18,6 +18,7 @@ pub enum KeywordKind {
     Sizeof,
     Struct,
     Fn,
+    FnSys,
     Break,
     Continue,
     Void,
@@ -200,6 +201,7 @@ impl<'a> Lexer<'a> {
             "expose_prov" => TokenKind::Keyword(KeywordKind::ExposeProvenance),
             "unexpose_prov" => TokenKind::Keyword(KeywordKind::UnexposeProv),
             "copy_prov" => TokenKind::Keyword(KeywordKind::CopyProvenance),
+            "fn_sys" => TokenKind::Keyword(KeywordKind::FnSys),
             _ => TokenKind::Ident(ctx.intern_symbol(s)),
         };
         self.tokens.push(Token { kind, span });
@@ -509,6 +511,7 @@ fn test_lexer() {
         TokenKind::Keyword(KeywordKind::UnexposeProv),
     );
     test("copy_prov", TokenKind::Keyword(KeywordKind::CopyProvenance));
+    test("fn_sys", TokenKind::Keyword(KeywordKind::FnSys));
 
     test_ident("hello");
     test_ident("hi");

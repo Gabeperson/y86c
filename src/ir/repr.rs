@@ -16,6 +16,12 @@ pub mod arenas {
 }
 pub use arenas::*;
 
+#[derive(Clone, Debug, Copy, PartialEq, Eq, Hash)]
+pub enum CallKind {
+    Internal,
+    Abi,
+}
+
 #[derive(Clone, Debug)]
 pub struct TypeContext {
     types: TypeArena,
@@ -54,6 +60,7 @@ impl TypeContext {
     pub fn intern_type(&mut self, typ: Type) -> TypeId {
         self.types.intern_deduplicated(typ)
     }
+    #[track_caller]
     pub fn get_type(&self, id: TypeId) -> &Type {
         self.types.get(id)
     }
@@ -254,6 +261,10 @@ pub enum InstExtraData {
     StackSlot(StackSlotId),
     // LoadGlobalLoc
     Global(Symbol),
+    // Call
+    Function(Symbol),
+    // IndirectCall
+    ICallKind(CallKind),
     // Memcpy/bitcast
     ElementType(TypeId),
     // IndexAddr

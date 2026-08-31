@@ -139,6 +139,10 @@ impl<'a> SymbolTableBuilder<'a> {
                     let fnptr = self.ctx.intern_type(Type::FuncPtr {
                         return_type,
                         param_types,
+                        kind: match decl.calling_convention {
+                            crate::common::CallingConvention::Internal => FnPtrKind::Internal,
+                            crate::common::CallingConvention::Abi => FnPtrKind::Abi,
+                        },
                     });
                     let entry = GlobalVariableEntry {
                         span: decl.name.span,
@@ -312,9 +316,17 @@ mod tests {
             let z: *SomeStruct;
             let a: fn(int) -> *int;
             let b: fn() -> void;
+            let a1: fn_sys(int) -> *int;
+            let b1: fn_sys() -> void;
             fn foo(a: int) -> void {}
             fn bar(b: int) {}
             fn baz(c: int) -> *int {}
+            @[cc(abi)]
+            fn foo1(a: int) -> void {}
+            @[cc(abi)]
+            fn bar1(b: int) {}
+            @[cc(abi)]
+            fn baz1(c: int) -> *int {}
         "#;
         let mut ctx = Context::new();
         let table = succeeds(code, &mut ctx);
@@ -390,19 +402,44 @@ mod tests {
         let fnptr1 = ctx.intern_type(Type::FuncPtr {
             return_type: int_ptr,
             param_types: v.clone(),
+            kind: FnPtrKind::Internal,
         });
         let void = ctx.intern_type(Type::Void);
         let fnptr2 = ctx.intern_type(Type::FuncPtr {
             return_type: void,
             param_types: TinyVec::new(),
+            kind: FnPtrKind::Internal,
         });
         let fnptr34 = ctx.intern_type(Type::FuncPtr {
             return_type: void,
             param_types: v.clone(),
+            kind: FnPtrKind::Internal,
         });
         let fnptr5 = ctx.intern_type(Type::FuncPtr {
             return_type: int_ptr,
+            param_types: v.clone(),
+            kind: FnPtrKind::Internal,
+        });
+        let fnptr1_sys = ctx.intern_type(Type::FuncPtr {
+            return_type: int_ptr,
+            param_types: v.clone(),
+            kind: FnPtrKind::Abi,
+        });
+        let void = ctx.intern_type(Type::Void);
+        let fnptr2_sys = ctx.intern_type(Type::FuncPtr {
+            return_type: void,
+            param_types: TinyVec::new(),
+            kind: FnPtrKind::Abi,
+        });
+        let fnptr34_sys = ctx.intern_type(Type::FuncPtr {
+            return_type: void,
+            param_types: v.clone(),
+            kind: FnPtrKind::Abi,
+        });
+        let fnptr5_sys = ctx.intern_type(Type::FuncPtr {
+            return_type: int_ptr,
             param_types: v,
+            kind: FnPtrKind::Abi,
         });
         let e1 = table.vars.get(&ctx.intern_symbol("x")).unwrap();
         assert!(!e1.is_function);
@@ -428,6 +465,22 @@ mod tests {
         let e8 = table.vars.get(&ctx.intern_symbol("baz")).unwrap();
         assert!(e8.is_function);
         assert_eq!(e8.typ, fnptr5);
+
+        let e9 = table.vars.get(&ctx.intern_symbol("a1")).unwrap();
+        assert!(!e9.is_function);
+        assert_eq!(e9.typ, fnptr1_sys);
+        let e10 = table.vars.get(&ctx.intern_symbol("b1")).unwrap();
+        assert!(!e10.is_function);
+        assert_eq!(e10.typ, fnptr2_sys);
+        let e10 = table.vars.get(&ctx.intern_symbol("foo1")).unwrap();
+        assert!(e10.is_function);
+        assert_eq!(e10.typ, fnptr34_sys);
+        let e11 = table.vars.get(&ctx.intern_symbol("bar1")).unwrap();
+        assert!(e11.is_function);
+        assert_eq!(e11.typ, fnptr34_sys);
+        let e12 = table.vars.get(&ctx.intern_symbol("baz1")).unwrap();
+        assert!(e12.is_function);
+        assert_eq!(e12.typ, fnptr5_sys);
     }
 
     #[test]

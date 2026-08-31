@@ -196,6 +196,7 @@ impl LoweringPrepass<'_> {
                 } else {
                     self.visit_stmt(body);
                 }
+                self.scoped.exit_scope();
             }
             StmtKind::ReturnStmt(return_stmt) => {
                 if let Some(expr) = return_stmt.value {

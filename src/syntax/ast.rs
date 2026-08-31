@@ -60,6 +60,12 @@ impl Default for NodeId {
     }
 }
 
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq)]
+pub enum FnPtrKind {
+    Internal,
+    Abi,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Type {
     Void,
@@ -78,6 +84,7 @@ pub enum Type {
     FuncPtr {
         return_type: TypeId,
         param_types: TinyVec<[TypeId; 5]>,
+        kind: FnPtrKind,
     },
 }
 
@@ -99,6 +106,24 @@ impl Type {
     }
     pub fn is_fnptr(&self) -> bool {
         matches!(self, Type::FuncPtr { .. })
+    }
+    pub fn is_internal_fnptr(&self) -> bool {
+        matches!(
+            self,
+            Type::FuncPtr {
+                kind: FnPtrKind::Internal,
+                ..
+            }
+        )
+    }
+    pub fn is_abi_fnptr(&self) -> bool {
+        matches!(
+            self,
+            Type::FuncPtr {
+                kind: FnPtrKind::Abi,
+                ..
+            }
+        )
     }
     pub fn indexed_type(&self) -> Option<TypeId> {
         match self {

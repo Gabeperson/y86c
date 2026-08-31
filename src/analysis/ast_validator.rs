@@ -321,6 +321,7 @@ impl AstValidator {
             Type::FuncPtr {
                 return_type,
                 param_types,
+                kind: _,
             } => {
                 self.visit_type_impl(ctx.get_type(*return_type), true, true, span, ctx);
                 for param_type in param_types {

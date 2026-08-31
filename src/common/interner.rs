@@ -114,6 +114,7 @@ impl<T> Interner<T> {
     pub fn is_empty(&self) -> bool {
         self.arr.is_empty()
     }
+    #[track_caller]
     pub fn get(&self, id: Id<T>) -> &T {
         if id.index.get() == u32::MAX {
             panic!("Internal compiler error");
@@ -192,9 +193,11 @@ macro_rules! define_id {
             pub fn new() -> Self {
                 Self($crate::common::interner::Interner::new())
             }
+            #[track_caller]
             pub fn get(&self, id: $id) -> &$typ {
                 self.0.get(id.0)
             }
+            #[track_caller]
             pub fn get_mut(&mut self, id: $id) -> &mut $typ {
                 self.0.get_mut(id.0)
             }

@@ -338,6 +338,14 @@ impl<'a> IrPrinter<'a> {
                 }
                 write!(f, "]")
             }
+            InstExtraData::Function(symbol) => {
+                let s = self.symbols.get(*symbol);
+                write!(f, "[func: {s}]")
+            }
+            InstExtraData::ICallKind(call_kind) => match call_kind {
+                CallKind::Internal => write!(f, "[internal_call]"),
+                CallKind::Abi => write!(f, "[abi_call]"),
+            },
             InstExtraData::None => Ok(()),
         }?;
         Ok(())
