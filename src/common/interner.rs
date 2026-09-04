@@ -8,6 +8,15 @@ pub struct Id<T> {
     _marker: PhantomData<fn() -> T>,
 }
 
+impl<T> Id<T> {
+    fn new(index: NonZeroU32) -> Self {
+        Self {
+            index,
+            _marker: PhantomData,
+        }
+    }
+}
+
 impl<T> std::fmt::Debug for Id<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_tuple("Id").field(&self.index).finish()
@@ -88,10 +97,7 @@ impl<T> Interner<T> {
             panic!("More than 4 billion entries...?");
         }
         let nonzero = NonZeroU32::new(idx).unwrap();
-        Id {
-            index: nonzero,
-            _marker: PhantomData,
-        }
+        Id::new(nonzero)
     }
     pub fn intern_mut(&mut self, item: T) -> (Id<T>, &mut T) {
         let idx = self.arr.len() as u32 + 1;
@@ -100,13 +106,7 @@ impl<T> Interner<T> {
             panic!("More than 4 billion entries...?");
         }
         let nonzero = NonZeroU32::new(idx).unwrap();
-        (
-            Id {
-                index: nonzero,
-                _marker: PhantomData,
-            },
-            item,
-        )
+        (Id::new(nonzero), item)
     }
     pub fn len(&self) -> usize {
         self.arr.len()
@@ -143,6 +143,11 @@ impl<T> Interner<T> {
         let index = (id.index.get() - 1) as usize;
         self.arr.get_mut(index)
     }
+    pub fn fold<I, F: FnMut(I, Id<T>, &T) -> I>(&self, init: I, mut f: F) -> I {
+        self.arr.iter().enumerate().fold(init, |acc, (i, item)| {
+            f(acc, Id::new(NonZeroU32::new(i as u32).unwrap()), item)
+        })
+    }
 }
 
 macro_rules! define_id {
@@ -177,7 +182,7 @@ macro_rules! define_id {
         }
         impl $id {
             pub fn get(self) -> u32 {
-                self.0.get()
+                self.0.get().checked_sub(1).unwrap()
             }
         }
         #[derive(Debug, Clone)]
@@ -219,6 +224,9 @@ macro_rules! define_id {
             pub fn intern_mut(&mut self, item: $typ) -> ($id, &mut $typ) {
                 let (id, item) = self.0.intern_mut(item);
                 ($id(id), item)
+            }
+            pub fn fold<I, F: FnMut(I, $id, &$typ) -> I>(&self, init: I, mut f: F) -> I {
+                self.0.fold(init, |acc, id, typ| f(acc, $id(id), typ))
             }
         }
     };

@@ -1,12 +1,14 @@
 use std::ops::ControlFlow;
 
-use ahash::AHashMap;
+use ahash::{AHashMap, RandomState};
+use indexmap::IndexMap;
 use tinyvec::TinyVec;
 
 use crate::analysis::symbol_table::SymbolTable;
 use crate::analysis::type_checker::ExprTypeInfo;
 use crate::common::span::Span;
 use crate::common::symbol::Symbol;
+use crate::ir::globals::{GlobalEvalError, GlobalEvaluator};
 use crate::ir::lower_prepass::{self as prepass, LoweringPrepassOutput};
 use crate::ir::repr::*;
 use crate::syntax::ast::{self, NodeId};
@@ -16,7 +18,7 @@ use crate::syntax::context::{Context, ExprId, StmtId};
 #[derive(Debug)]
 pub struct Lowerer<'a> {
     prepass: &'a mut LoweringPrepassOutput,
-    functions: Vec<Function>,
+    functions: IndexMap<Symbol, Function, RandomState>,
     symbol_table: &'a SymbolTable,
     ctx: &'a mut Context,
     type_table: &'a AHashMap<NodeId, ExprTypeInfo>,
@@ -38,7 +40,7 @@ impl<'a> Lowerer<'a> {
     ) -> Self {
         Self {
             prepass,
-            functions: Vec::new(),
+            functions: IndexMap::with_hasher(RandomState::new()),
             symbol_table,
             ctx,
             type_table,
@@ -50,13 +52,19 @@ impl<'a> Lowerer<'a> {
             aliases: AHashMap::new(),
         }
     }
-    pub fn lower(mut self, program: &ast::Program) -> (TypeContext, Vec<Function>) {
+    pub fn lower(mut self, program: &ast::Program) -> Result<IrProgram, Vec<GlobalEvalError>> {
         for decl in &program.decls {
             if let ast::GlobalDeclarationKind::Function(func) = &decl.kind {
                 self.lower_function(func);
             }
         }
-        (self.typectx, self.functions)
+        let global_eval =
+            GlobalEvaluator::eval(program, self.ctx, self.type_table, self.symbol_table)?;
+        Ok(IrProgram {
+            typectx: self.typectx,
+            globals: global_eval,
+            functions: self.functions,
+        })
     }
     fn lower_function(&mut self, decl: &ast::FunctionDeclaration) {
         let mut function = Function {
@@ -97,7 +105,7 @@ impl<'a> Lowerer<'a> {
             aliases: &mut self.aliases,
         };
         lowerer.lower(decl);
-        self.functions.push(function);
+        self.functions.insert(decl.name.sym, function);
     }
 }
 
@@ -314,24 +322,13 @@ impl<'a> FunctionLowerer<'a> {
                     self.write_variable(VarId::Id(var_id), entry_block, ptr);
                 }
                 _ => {
-                    let size = self.typectx.type_size(typ_id);
-                    let align = self.typectx.type_align(typ_id);
-                    let slot_id = self.new_stackslot(
-                        size,
-                        align,
-                        Some(name.sym),
-                        StackSlotKind::FnArgument {
-                            typ: typ_id,
-                            idx: (i + sret_add) as u32,
-                        },
-                    );
-
                     let ptr_typ = self.typectx.ptr_typ();
                     let (val_id, _, val, inst) =
-                        self.new_inst1(Opcode::GetStackAddr, entry_block, name.span, &[], ptr_typ);
-                    inst.extra = InstExtraData::StackSlot(slot_id);
+                        self.new_inst1(Opcode::Param, entry_block, name.span, &[], ptr_typ);
+                    inst.extra = InstExtraData::ParamIndex {
+                        index: (i + sret_add) as u32,
+                    };
                     val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
-
                     self.function.sig.params.push(FunctionParam {
                         kind: FunctionParamKind::Arg,
                         typ: ptr_typ,
@@ -340,7 +337,7 @@ impl<'a> FunctionLowerer<'a> {
                     let prov = self
                         .function
                         .provenances
-                        .intern_deduplicated(Provenance::StackSlot(slot_id));
+                        .intern_deduplicated(Provenance::NoaliasArg(val_id));
                     self.function.value_provenances.insert(val_id, prov);
 
                     self.write_variable(VarId::Id(var_id), entry_block, val_id);
@@ -1287,9 +1284,30 @@ impl<'a> FunctionLowerer<'a> {
         }
         let mut block = next;
         for arg in funccall.args {
+            let typ_id = self.get_expr_type(arg);
+            let typ = self.typectx.get_type(typ_id);
+            let is_aggregate = typ.is_struct() || typ.is_array();
             let (arg, next) = self.lower_expr(arg, block, None);
-            let arg = arg.read(self, next);
-            args.push(arg);
+            if is_aggregate {
+                let ptr = arg.get_ptr();
+                let size = self.typectx.type_size(typ_id);
+                let align = self.typectx.type_align(typ_id);
+                let stack_id = self.new_stackslot(
+                    size,
+                    align,
+                    None,
+                    StackSlotKind::FnArgumentSend { typ: typ_id },
+                );
+                let ptr_typ = self.typectx.ptr_typ();
+                let (stackslot_ptr, _, _, inst) =
+                    self.new_inst1(Opcode::GetStackAddr, next, funccall.span, &[], ptr_typ);
+                inst.extra = InstExtraData::StackSlot(stack_id);
+                self.new_memcpy(next, funccall.span, stackslot_ptr, ptr, typ_id);
+                args.push(stackslot_ptr);
+            } else {
+                let arg = arg.read(self, next);
+                args.push(arg);
+            }
             block = next;
         }
 
@@ -1394,6 +1412,7 @@ impl<'a> FunctionLowerer<'a> {
             .map(|(name, expr)| (name.sym, expr, s_info.order[&name.sym]))
             .collect();
         let struct_id = self.get_structid(struct_init.name.sym);
+        let s_typ = self.typectx.intern_type(Type::Struct(struct_id));
         let ptr_typ = self.typectx.ptr_typ();
         let mut block = block_id;
         for (sym, expr, idx) in inits {
@@ -1423,7 +1442,7 @@ impl<'a> FunctionLowerer<'a> {
                 block = next;
             }
         }
-        (Place::ssa(sptr), block)
+        (Place::ptr(sptr, struct_init.span, s_typ), block)
     }
     fn lower_array_init(
         &mut self,

@@ -41,21 +41,18 @@ fn main() {
     let type_table = type_check_res.type_table;
     let mut prepass = LoweringPrepass::run(&program, &ctx, &symbol_table);
     let lowerer = Lowerer::new(&mut prepass, &symbol_table, &mut ctx, &type_table);
-    let (typectx, functions) = lowerer.lower(&program);
-
-    let globals = match GlobalEvaluator::eval(&program, &ctx, &type_table, &symbol_table) {
-        Ok(globals) => globals,
+    let ir_program = match lowerer.lower(&program) {
+        Ok(p) => p,
         Err(e) => {
             dbg!(e);
             std::process::exit(1);
         }
     };
-    dbg!(globals);
 
-    // let printer = IrPrinter::new(&typectx, &ctx.symbol_interner);
-    // for function in functions {
-    //     let res = printer.print(&function).unwrap();
-    //     println!("{res}");
-    //     println!();
-    // }
+    let printer = IrPrinter::new(&ir_program.typectx, &ctx.symbol_interner);
+    for function in &ir_program.functions {
+        let res = printer.print(function).unwrap();
+        println!("{res}");
+        println!();
+    }
 }

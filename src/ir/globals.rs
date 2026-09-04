@@ -13,7 +13,7 @@ use crate::syntax::context::{Context, ExprId, TypeId};
 
 #[derive(Clone, Debug, Default)]
 pub struct EvaluatedGlobals {
-    pub map: AHashMap<Symbol, Global>,
+    pub map: IndexMap<Symbol, Global, RandomState>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -36,10 +36,6 @@ pub enum ConstVal {
     None,
 }
 
-pub trait GlobalLocProvider {
-    fn get_global_location(&self, global: Symbol) -> i64;
-}
-
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct StructField {
     pub sym: Symbol,
@@ -59,14 +55,14 @@ impl Global {
 }
 
 impl ConstVal {
-    pub fn write<P: GlobalLocProvider>(&self, buf: &mut [u8], provider: &P) {
+    pub fn write<F: FnMut(Symbol) -> i64>(&self, buf: &mut [u8], mut f: F) {
         match self {
             ConstVal::Int(int) => {
                 let bytes = int.to_le_bytes();
                 buf[..8].copy_from_slice(&bytes)
             }
             ConstVal::Addr { sym, add } => {
-                let addr = provider.get_global_location(*sym);
+                let addr = f(*sym);
                 let bytes = i64::to_le_bytes(addr + *add);
                 buf[..8].copy_from_slice(&bytes)
             }
@@ -78,7 +74,7 @@ impl ConstVal {
                 for field in fields.iter() {
                     let offset = field.offset as usize;
                     let buf = &mut buf[offset..];
-                    field.elem.write(buf, provider);
+                    field.elem.write(buf, &mut f);
                 }
             }
             ConstVal::Array { elem_layout, elems } => {
@@ -86,7 +82,7 @@ impl ConstVal {
                 for (index, elem) in elems.iter().enumerate() {
                     let offset = index * size;
                     let buf = &mut buf[offset..];
-                    elem.write(buf, provider)
+                    elem.write(buf, &mut f)
                 }
             }
             ConstVal::Invalid => unreachable!(),
@@ -147,7 +143,7 @@ pub struct GlobalEvaluator<'a> {
 
     resolving: IndexMap<Symbol, GlobalEvalReq, RandomState>,
     error_globals: AHashSet<Symbol>,
-    evaled: AHashMap<Symbol, Global>,
+    evaled: IndexMap<Symbol, Global, RandomState>,
     errors: Vec<GlobalEvalError>,
 }
 
@@ -170,7 +166,7 @@ impl<'a> GlobalEvaluator<'a> {
             symbol_table,
             resolving: IndexMap::with_hasher(RandomState::new()),
             error_globals: AHashSet::new(),
-            evaled: AHashMap::new(),
+            evaled: IndexMap::with_hasher(RandomState::new()),
             errors: Vec::new(),
         };
         for decl in globals.values() {

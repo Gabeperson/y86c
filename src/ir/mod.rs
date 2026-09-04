@@ -1,4 +1,5 @@
 pub mod globals;
+pub mod interp;
 pub mod lower;
 pub mod lower_prepass;
 pub mod print;

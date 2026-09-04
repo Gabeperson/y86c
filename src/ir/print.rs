@@ -233,7 +233,7 @@ impl<'a> IrPrinter<'a> {
         let () = match stackslot.kind {
             StackSlotKind::AddressTakenLocal => write!(f, "addr_taken_local"),
             StackSlotKind::Aggregate => write!(f, "aggregate_local"),
-            StackSlotKind::FnArgument { idx, .. } => write!(f, "fn_arg({idx})"),
+            StackSlotKind::FnArgumentSend { .. } => write!(f, "fn_arg"),
             StackSlotKind::IntermediateAggregate => write!(f, "intermediate_aggregate"),
         }?;
         write!(f, "]")?;
@@ -241,7 +241,7 @@ impl<'a> IrPrinter<'a> {
     }
     fn fmt_provenance(&self, id: ProvenanceId, f: &mut Formatter<'_>, ctx: &Ctx) -> FmtResult {
         let prov = ctx.provenances.get(id);
-        write!(f, "[prov: ")?;
+        write!(f, " [prov: ")?;
         let () = match prov {
             Provenance::StackSlot(stack_slot_id) => {
                 write!(f, "stackslot({})", stack_slot_id.get())

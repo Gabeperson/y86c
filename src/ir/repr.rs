@@ -1,7 +1,11 @@
-use ahash::AHashMap;
+use ahash::{AHashMap, RandomState};
+use indexmap::IndexMap;
 use tinyvec::{TinyVec, tiny_vec};
 
-use crate::common::{CallingConvention, Inline, span::Span, symbol::Symbol};
+use crate::{
+    common::{CallingConvention, Inline, span::Span, symbol::Symbol},
+    ir::globals::EvaluatedGlobals,
+};
 
 pub mod arenas {
     use super::*;
@@ -215,7 +219,7 @@ pub struct StackSlot {
 pub enum StackSlotKind {
     AddressTakenLocal,
     Aggregate,
-    FnArgument { typ: TypeId, idx: u32 },
+    FnArgumentSend { typ: TypeId },
     IntermediateAggregate,
 }
 
@@ -421,4 +425,11 @@ pub struct Function {
     pub values: ValueArena,
     pub provenances: ProvenanceArena,
     pub value_provenances: AHashMap<ValueId, ProvenanceId>,
+}
+
+#[derive(Debug, Clone)]
+pub struct IrProgram {
+    pub typectx: TypeContext,
+    pub globals: EvaluatedGlobals,
+    pub functions: IndexMap<Symbol, Function, RandomState>,
 }
