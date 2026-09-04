@@ -14,8 +14,8 @@ struct BigStruct {
     b: *int,
     c: *void,
 }
-let bs: BigStruct;
-let bsp: *BigStruct;
+let g_bs: BigStruct;
+let g_bsp: *BigStruct;
 
 fn v_cond_if1() { if (1) {} }
 fn v_cond_if2() { if (0) {} }
@@ -296,15 +296,15 @@ fn v_memberaccess() {
 }
 
 fn v_memberaccess() {
-    let a: int = bs.a;
-    let b: *int = bs.b;
-    let c: *int = bs.c;
+    let a: int = g_bs.a;
+    let b: *int = g_bs.b;
+    let c: *int = g_bs.c;
 }
 fn i_memberaccess1() {
-    bsp.a;
+    g_bsp.a;
 }
 fn i_memberaccess2() {
-    bs.d;
+    g_bs.d;
 }
 fn i_memberaccess3() {
     1.something;
@@ -316,15 +316,15 @@ fn v_ptr_memberaccess(s: *BigStruct) {
     let c: *int = s->c;
 }
 fn v_ptr_memberaccess() {
-    let a: int = bsp->a;
-    let b: *int = bsp->b;
-    let c: *int = bsp->c;
+    let a: int = g_bsp->a;
+    let b: *int = g_bsp->b;
+    let c: *int = g_bsp->c;
 }
 fn i_ptr_memberaccess1() {
-    bs->a;
+    g_bs->a;
 }
 fn i_ptr_memberaccess2() {
-    bsp->d;
+    g_bsp->d;
 }
 fn i_ptr_memberaccess3() {
     1->something;
@@ -569,6 +569,12 @@ fn i_deref() { *[1]; }
 fn i_deref() { *u_void(); }
 
 fn v_addr() { let a: int; let b: *int = &a; }
+fn v_addr() { let a: *int = &g_bs.a; }
+fn v_addr() { let a: **int = &g_bs.b; }
+fn v_addr() { let a: *void = &g_bs.b; }
+fn v_addr() { let a: *int = &g_bsp->a; }
+fn v_addr() { let a: **int = &g_bsp->b; }
+
 fn v_addr() { let a: *int; let b: **int = &a; }
 fn v_addr() { let a: Struct; let b: *Struct = &a; }
 fn v_addr() { let a: [int; 2]; let b: *[int ;2] = &a; }
@@ -614,3 +620,46 @@ fn v_fnptrkinds() { let a: fn() = u_nonsys; }
 fn v_fnptrkinds() { let a: fn_sys() = u_sys; }
 fn i_fnptrkinds() { let a: fn() = u_sys; }
 fn i_fnptrkinds() { let a: fn_sys() = u_nonsys; }
+
+
+let g_struct: Struct = Struct {x: 1};
+let g_int: int = 1;
+
+let v_global: int;
+let v_global: int = 1;
+let g_struct: Struct = Struct {x: 1};
+let v_global: int = g_struct.x;
+let i_global: int = u_fn1();
+let i_global: int = g_int += 1;
+let i_global: int = g_int = 1;
+struct StructWithOneArray {
+    a: [*void; 20],
+}
+struct StructWithArrays {
+    a: [int; 5],
+    b: [Struct; 5],
+    c: [StructWithOneArray; 2],
+}
+let g_swa: StructWithArrays;
+let v_global: int = g_swa.a[0];
+let v_global: int = g_swa.b[0].x;
+let v_global: *int = g_swa.c[1].a[2];
+let v_global: *int = &g_int;
+let i_global: int = *(nullptr as *int);
+let v_global: *void = nullptr;
+let v_global: *int = nullptr;
+let i_global: int = (nullptr as *Struct)->x;
+
+let i_global: *int = new_prov(nullptr);
+let i_global: int = expose_prov(1);
+let i_global: *int = unexpose_prov(1);
+let i_global: *int = copy_prov(nullptr, 1);
+
+let i_global: int = g_int++;
+let i_global: int = g_int--;
+let i_global: int = ++g_int;
+let i_global: int = --g_int;
+
+let v_global: int = 1 ? 1 : 2;
+let v_global: int = 1 ^ 2 && 5 * 100 / 100 | 5 || 152 ^ 125
+    ^ 0x5512 % 2 && !5 & - -5 < 5 > 15 <= 5 >= 15 == 125 != 125;

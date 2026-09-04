@@ -1,3 +1,5 @@
+let x: *int = main as *int + 1;
+let y: int;
 struct Foo {
     foo: *int,
 }

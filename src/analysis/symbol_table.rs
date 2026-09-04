@@ -119,10 +119,7 @@ impl<'a> SymbolTableBuilder<'a> {
                         typ,
                         is_function: false,
                     };
-                    assert!(
-                        self.symbol_table.vars.insert(name, entry).is_none(),
-                        "Internal Compiler Error"
-                    );
+                    self.symbol_table.vars.insert(name, entry);
                 }
                 GlobalDeclarationKind::Struct(decl) => {
                     self.struct_map.insert(decl.name.sym, decl);
@@ -149,10 +146,7 @@ impl<'a> SymbolTableBuilder<'a> {
                         typ: fnptr,
                         is_function: true,
                     };
-                    assert!(
-                        self.symbol_table.vars.insert(name, entry).is_none(),
-                        "Internal Compiler Error"
-                    )
+                    self.symbol_table.vars.insert(name, entry);
                 }
             }
         }

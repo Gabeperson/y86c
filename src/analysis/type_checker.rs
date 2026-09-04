@@ -201,6 +201,14 @@ pub enum TypeCheckError {
         typ: TypeId,
         span: Span,
     },
+    ProvenanceExprInGlobal {
+        expr_id: ExprId,
+        span: Span,
+    },
+    NonConstExprInGlobal {
+        expr_id: ExprId,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -277,19 +285,25 @@ impl<'a> TypeChecker<'a> {
     }
     fn check_inner(&mut self, program: &Program) {
         for decl in &program.decls {
-            if let GlobalDeclarationKind::Function(func) = &decl.kind {
-                let ret_type = match &func.return_type {
-                    Some(typ) => typ.inner,
-                    None => self.ctx.intern_type(Type::Void),
-                };
-                self.map.enter_scope();
-                for (name, typ) in func.params.iter().copied() {
-                    self.map
-                        .insert(name.sym, VarInfo::new(typ.inner, typ.span, true));
+            match &decl.kind {
+                GlobalDeclarationKind::Function(func) => {
+                    let ret_type = match &func.return_type {
+                        Some(typ) => typ.inner,
+                        None => self.ctx.intern_type(Type::Void),
+                    };
+                    self.map.enter_scope();
+                    for (name, typ) in func.params.iter().copied() {
+                        self.map
+                            .insert(name.sym, VarInfo::new(typ.inner, typ.span, true));
+                    }
+                    self.check_block(&func.body, ret_type, false);
+                    self.map.exit_scope();
                 }
-                self.check_block(&func.body, ret_type, false);
-                self.map.exit_scope();
-            };
+                GlobalDeclarationKind::Variable(variable_declaration) => {
+                    self.check_vardecl(*variable_declaration, true);
+                }
+                _ => {}
+            }
         }
     }
     fn check_block(&mut self, block: &Block, func_ret: TypeId, new_scope: bool) {
@@ -308,7 +322,7 @@ impl<'a> TypeChecker<'a> {
         match &stmt.kind {
             StmtKind::Assert(assert) => {
                 let condition = assert.condition;
-                if let Some(info) = self.check_expr(condition) {
+                if let Some(info) = self.check_expr(condition, false) {
                     let typ = self.ctx.get_type(info.id);
                     if !typ.is_intlike() {
                         let expr = self.ctx.get_expr(condition);
@@ -328,7 +342,7 @@ impl<'a> TypeChecker<'a> {
                 let condition = if_stmt.condition;
                 let then_branch = if_stmt.then_branch;
                 let else_branch = if_stmt.else_branch;
-                if let Some(info) = self.check_expr(condition)
+                if let Some(info) = self.check_expr(condition, false)
                     && let typ = self.ctx.get_type(info.id)
                     && !typ.is_intlike()
                 {
@@ -348,7 +362,7 @@ impl<'a> TypeChecker<'a> {
                 let condition = while_loop.condition;
                 let body = while_loop.body;
 
-                if let Some(info) = self.check_expr(condition)
+                if let Some(info) = self.check_expr(condition, false)
                     && let typ = self.ctx.get_type(info.id)
                     && !typ.is_intlike()
                 {
@@ -372,7 +386,7 @@ impl<'a> TypeChecker<'a> {
                     self.check_stmt(init, func_ret);
                 }
                 if let Some(condition) = condition
-                    && let Some(info) = self.check_expr(condition)
+                    && let Some(info) = self.check_expr(condition, false)
                     && let typ = self.ctx.get_type(info.id)
                     && !typ.is_intlike()
                 {
@@ -384,7 +398,7 @@ impl<'a> TypeChecker<'a> {
                     })
                 }
                 if let Some(post) = post {
-                    self.check_expr(post);
+                    self.check_expr(post, false);
                 }
                 if let StmtKind::Block(block) = &self.ctx.get_stmt(body).kind {
                     let block = block.clone();
@@ -398,7 +412,7 @@ impl<'a> TypeChecker<'a> {
                 let value = return_stmt.value;
                 let span = return_stmt.span;
                 let ret_type_info = if let Some(expr) = value {
-                    if let Some(typ) = self.check_expr(expr) {
+                    if let Some(typ) = self.check_expr(expr, false) {
                         typ
                     } else {
                         return;
@@ -417,47 +431,54 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             StmtKind::VariableDeclaration(variable_declaration) => {
-                let name = variable_declaration.name;
-                let var_type = variable_declaration.var_type;
-                let init_value = variable_declaration.init_value;
-                let span = variable_declaration.span;
-                if self.check_type(var_type.inner, var_type.span).is_none() {
-                    let void = self.ctx.intern_type(Type::Void);
-                    self.map.insert(name.sym, VarInfo::new(void, span, true));
-                    return;
-                }
-                if let Some(var_info) = self.map.get_current_scope(name.sym) {
-                    self.errors.push(TypeCheckError::RedeclaredVariable {
-                        def: name.span,
-                        prev_def: var_info.span,
-                        symbol: name.sym,
-                    })
-                }
-                if let Some(expr_id) = init_value {
-                    let Some(typ_info) = self.check_expr(expr_id) else {
-                        return;
-                    };
-                    let init_type = self.ctx.get_type(typ_info.id);
-                    let var_declared_type = self.ctx.get_type(var_type.inner);
-                    if !init_type.is_assignable_to(var_declared_type, self.ctx) {
-                        let expr = self.ctx.get_expr(expr_id);
-                        self.errors.push(TypeCheckError::InvalidAssignmentTypes {
-                            expected: var_type.inner,
-                            found: typ_info.id,
-                            span: expr.span,
-                        })
-                    }
-                }
-                self.map
-                    .insert(name.sym, VarInfo::new(var_type.inner, span, true));
+                self.check_vardecl(*variable_declaration, false);
             }
             StmtKind::Expr(expr) => {
-                self.check_expr(*expr);
+                self.check_expr(*expr, false);
             }
         }
     }
-    fn check_cast(&mut self, cast: Cast) -> Option<ExprTypeInfo> {
-        let info = self.check_expr(cast.expr)?;
+    fn check_vardecl(&mut self, variable_declaration: VariableDeclaration, is_global: bool) {
+        let name = variable_declaration.name;
+        let var_type = variable_declaration.var_type;
+        let init_value = variable_declaration.init_value;
+        let span = variable_declaration.span;
+        if self.check_type(var_type.inner, var_type.span).is_none() {
+            let void = self.ctx.intern_type(Type::Void);
+            self.map.insert(name.sym, VarInfo::new(void, span, true));
+            return;
+        }
+        if let Some(var_info) = self.map.get_current_scope(name.sym)
+            && !is_global
+        {
+            self.errors.push(TypeCheckError::RedeclaredVariable {
+                def: name.span,
+                prev_def: var_info.span,
+                symbol: name.sym,
+            })
+        }
+        if let Some(expr_id) = init_value {
+            let Some(typ_info) = self.check_expr(expr_id, is_global) else {
+                return;
+            };
+            let init_type = self.ctx.get_type(typ_info.id);
+            let var_declared_type = self.ctx.get_type(var_type.inner);
+            if !init_type.is_assignable_to(var_declared_type, self.ctx) {
+                let expr = self.ctx.get_expr(expr_id);
+                self.errors.push(TypeCheckError::InvalidAssignmentTypes {
+                    expected: var_type.inner,
+                    found: typ_info.id,
+                    span: expr.span,
+                })
+            }
+        }
+        if !is_global {
+            self.map
+                .insert(name.sym, VarInfo::new(var_type.inner, span, true));
+        }
+    }
+    fn check_cast(&mut self, cast: Cast, is_global: bool) -> Option<ExprTypeInfo> {
+        let info = self.check_expr(cast.expr, is_global)?;
         self.check_type(cast.to_type.inner, cast.to_type.span)?;
         let expr_type = self.ctx.get_type(info.id);
         let to_type = self.ctx.get_type(cast.to_type.inner);
@@ -473,7 +494,7 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(cast.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_ident(&mut self, ident: Ident) -> Option<ExprTypeInfo> {
+    fn check_ident(&mut self, ident: Ident, _is_global: bool) -> Option<ExprTypeInfo> {
         if let Some(var_info) = self.map.get(ident.sym) {
             if *self.ctx.get_type(var_info.id) == Type::Void {
                 return None;
@@ -488,8 +509,8 @@ impl<'a> TypeChecker<'a> {
         });
         None
     }
-    fn check_ternary(&mut self, ternary: Ternary) -> Option<ExprTypeInfo> {
-        if let Some(info) = self.check_expr(ternary.condition) {
+    fn check_ternary(&mut self, ternary: Ternary, is_global: bool) -> Option<ExprTypeInfo> {
+        if let Some(info) = self.check_expr(ternary.condition, is_global) {
             let typ = self.ctx.get_type(info.id);
             if !typ.is_intlike() {
                 let expr = self.ctx.get_expr(ternary.condition);
@@ -500,8 +521,8 @@ impl<'a> TypeChecker<'a> {
                 });
             }
         }
-        let true_branch = self.check_expr(ternary.true_branch);
-        let false_branch = self.check_expr(ternary.false_branch);
+        let true_branch = self.check_expr(ternary.true_branch, is_global);
+        let false_branch = self.check_expr(ternary.false_branch, is_global);
         let (Some(true_branch), Some(false_branch)) = (true_branch, false_branch) else {
             return None;
         };
@@ -522,8 +543,20 @@ impl<'a> TypeChecker<'a> {
             Some(expr_type_info)
         }
     }
-    fn check_function_call(&mut self, function_call: FunctionCall) -> Option<ExprTypeInfo> {
-        let fnptr_info = self.check_expr(function_call.func_expr)?;
+    fn check_function_call(
+        &mut self,
+        function_call: FunctionCall,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        if is_global {
+            self.errors.push(TypeCheckError::NonConstExprInGlobal {
+                expr_id,
+                span: function_call.span,
+            });
+            return None;
+        }
+        let fnptr_info = self.check_expr(function_call.func_expr, false)?;
         let typ = self.ctx.get_type(fnptr_info.id);
         let Type::FuncPtr {
             return_type,
@@ -552,7 +585,7 @@ impl<'a> TypeChecker<'a> {
             .zip(function_call.args.iter())
             .enumerate()
         {
-            let Some(id) = self.check_expr(*arg) else {
+            let Some(id) = self.check_expr(*arg, false) else {
                 continue;
             };
             let arg_typ = self.ctx.get_type(id.id);
@@ -573,15 +606,27 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(function_call.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_array_index(&mut self, array_index: ArrayIndex) -> Option<ExprTypeInfo> {
-        let arr = self.check_expr(array_index.array);
-        let index = self.check_expr(array_index.index);
+    fn check_array_index(
+        &mut self,
+        array_index: ArrayIndex,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        let arr = self.check_expr(array_index.array, is_global);
+        let index = self.check_expr(array_index.index, is_global);
         let elem_type = if let Some(arr) = &arr {
             let typ = self.ctx.get_type(arr.id);
             if let Some(indexed) = typ.indexed_type()
-                && let typ = self.ctx.get_type(indexed)
-                && !typ.is_void()
+                && let ityp = self.ctx.get_type(indexed)
+                && !ityp.is_void()
             {
+                if is_global && typ.is_ptr() {
+                    self.errors.push(TypeCheckError::NonConstExprInGlobal {
+                        expr_id,
+                        span: array_index.span,
+                    });
+                    return None;
+                }
                 Some(indexed)
             } else {
                 let span = self.ctx.get_expr(array_index.array).span;
@@ -607,7 +652,11 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(array_index.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_struct_init(&mut self, struct_init: StructInit) -> Option<ExprTypeInfo> {
+    fn check_struct_init(
+        &mut self,
+        struct_init: StructInit,
+        is_global: bool,
+    ) -> Option<ExprTypeInfo> {
         let sym = struct_init.name.sym;
         let Some(info) = self.symbol_table.structs.get(&sym) else {
             self.errors.push(TypeCheckError::StructDoesntExist {
@@ -630,7 +679,7 @@ impl<'a> TypeChecker<'a> {
                 });
                 continue;
             };
-            let Some(expr_info) = self.check_expr(expr_id) else {
+            let Some(expr_info) = self.check_expr(expr_id, is_global) else {
                 continue;
             };
             let expr_typ = self.ctx.get_type(expr_info.id);
@@ -649,16 +698,16 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(struct_init.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_array_init(&mut self, array_init: ArrayInit) -> Option<ExprTypeInfo> {
+    fn check_array_init(&mut self, array_init: ArrayInit, is_global: bool) -> Option<ExprTypeInfo> {
         let Some(first) = array_init.elements.first() else {
             self.errors.push(TypeCheckError::EmptyArrayInit {
                 span: array_init.span,
             });
             return None;
         };
-        let first_typ = self.check_expr(*first)?;
+        let first_typ = self.check_expr(*first, is_global)?;
         for init in array_init.elements.get(1..).unwrap_or(&[]) {
-            let typ = self.check_expr(*init)?;
+            let typ = self.check_expr(*init, is_global)?;
             if first_typ.id != typ.id {
                 let first_span = self.ctx.get_expr(*first).span;
                 let diff_span = self.ctx.get_expr(*init).span;
@@ -679,8 +728,12 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(array_init.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_member_access(&mut self, member_access: MemberAccess) -> Option<ExprTypeInfo> {
-        let struct_typ_info = self.check_expr(member_access.struct_expr)?;
+    fn check_member_access(
+        &mut self,
+        member_access: MemberAccess,
+        is_global: bool,
+    ) -> Option<ExprTypeInfo> {
+        let struct_typ_info = self.check_expr(member_access.struct_expr, is_global)?;
         let typ = self.ctx.get_type(struct_typ_info.id);
         let struct_name = match typ {
             Type::Struct { name } => *name,
@@ -724,8 +777,17 @@ impl<'a> TypeChecker<'a> {
     fn check_pointer_member_access(
         &mut self,
         pointer_member_access: PointerMemberAccess,
+        is_global: bool,
+        expr_id: ExprId,
     ) -> Option<ExprTypeInfo> {
-        let struct_ptr_typ_info = self.check_expr(pointer_member_access.struct_ptr_expr)?;
+        if is_global {
+            self.errors.push(TypeCheckError::NonConstExprInGlobal {
+                expr_id,
+                span: pointer_member_access.span,
+            });
+            return None;
+        }
+        let struct_ptr_typ_info = self.check_expr(pointer_member_access.struct_ptr_expr, false)?;
         let typ = self.ctx.get_type(struct_ptr_typ_info.id);
         let struct_name = match typ {
             Type::Struct { .. } => {
@@ -774,8 +836,8 @@ impl<'a> TypeChecker<'a> {
             .insert(pointer_member_access.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_expr(&mut self, expr: ExprId) -> Option<ExprTypeInfo> {
-        let expr = self.ctx.get_expr(expr);
+    fn check_expr(&mut self, expr_id: ExprId, is_global: bool) -> Option<ExprTypeInfo> {
+        let expr = self.ctx.get_expr(expr_id);
         match &expr.kind {
             ExprKind::Nullptr(nullptr) => {
                 let id = nullptr.id;
@@ -796,13 +858,17 @@ impl<'a> TypeChecker<'a> {
                 self.type_table.insert(id, expr_type_info);
                 Some(expr_type_info)
             }
-            ExprKind::Cast(cast) => self.check_cast(*cast),
-            ExprKind::Ident(ident) => self.check_ident(*ident),
-            ExprKind::BinaryOp(binary_op) => self.check_binary_op(*binary_op),
-            ExprKind::PrefixOp(prefix_op) => self.check_prefix_op(*prefix_op),
-            ExprKind::PostfixOp(postfix_op) => self.check_postfix_op(*postfix_op),
-            ExprKind::Ternary(ternary) => self.check_ternary(*ternary),
-            ExprKind::ArrayIndex(array_index) => self.check_array_index(*array_index),
+            ExprKind::Cast(cast) => self.check_cast(*cast, is_global),
+            ExprKind::Ident(ident) => self.check_ident(*ident, is_global),
+            ExprKind::BinaryOp(binary_op) => self.check_binary_op(*binary_op, is_global, expr_id),
+            ExprKind::PrefixOp(prefix_op) => self.check_prefix_op(*prefix_op, is_global, expr_id),
+            ExprKind::PostfixOp(postfix_op) => {
+                self.check_postfix_op(*postfix_op, is_global, expr_id)
+            }
+            ExprKind::Ternary(ternary) => self.check_ternary(*ternary, is_global),
+            ExprKind::ArrayIndex(array_index) => {
+                self.check_array_index(*array_index, is_global, expr_id)
+            }
             ExprKind::SizeOfType(size_of_type) => {
                 let id = size_of_type.id;
                 self.check_type(size_of_type.typ.inner, size_of_type.typ.span);
@@ -812,25 +878,47 @@ impl<'a> TypeChecker<'a> {
             }
             // Ideally we don't need to clone these, but alas, we must, due to lifetimes
             ExprKind::FunctionCall(function_call) => {
-                self.check_function_call(function_call.clone())
+                self.check_function_call(function_call.clone(), is_global, expr_id)
             }
-            ExprKind::StructInit(struct_init) => self.check_struct_init(struct_init.clone()),
-            ExprKind::ArrayInit(array_init) => self.check_array_init(array_init.clone()),
-            ExprKind::MemberAccess(member_access) => self.check_member_access(*member_access),
+            ExprKind::StructInit(struct_init) => {
+                self.check_struct_init(struct_init.clone(), is_global)
+            }
+            ExprKind::ArrayInit(array_init) => self.check_array_init(array_init.clone(), is_global),
+            ExprKind::MemberAccess(member_access) => {
+                self.check_member_access(*member_access, is_global)
+            }
             ExprKind::PointerMemberAccess(pointer_member_access) => {
-                self.check_pointer_member_access(*pointer_member_access)
+                self.check_pointer_member_access(*pointer_member_access, is_global, expr_id)
             }
             ExprKind::Error => None,
-            ExprKind::CopyProvenance(copy_prov) => self.check_copy_prov(*copy_prov),
-            ExprKind::ExposeProvenance(expose_prov) => self.check_expose_prov(*expose_prov),
-            ExprKind::UnexposeProvenance(unexpose_prov) => self.check_unexpose_prov(*unexpose_prov),
-            ExprKind::NewProvenance(new_prov) => self.check_new_prov(*new_prov),
+            ExprKind::CopyProvenance(copy_prov) => {
+                self.check_copy_prov(*copy_prov, is_global, expr_id)
+            }
+            ExprKind::ExposeProvenance(expose_prov) => {
+                self.check_expose_prov(*expose_prov, is_global, expr_id)
+            }
+            ExprKind::UnexposeProvenance(unexpose_prov) => {
+                self.check_unexpose_prov(*unexpose_prov, is_global, expr_id)
+            }
+            ExprKind::NewProvenance(new_prov) => self.check_new_prov(*new_prov, is_global, expr_id),
         }
     }
 
-    fn check_copy_prov(&mut self, copy_prov: CopyProvenance) -> Option<ExprTypeInfo> {
-        let ptr = self.check_expr(copy_prov.prov_ptr);
-        let addr = self.check_expr(copy_prov.addr);
+    fn check_copy_prov(
+        &mut self,
+        copy_prov: CopyProvenance,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        if is_global {
+            self.errors.push(TypeCheckError::ProvenanceExprInGlobal {
+                expr_id,
+                span: copy_prov.span,
+            });
+            return None;
+        }
+        let ptr = self.check_expr(copy_prov.prov_ptr, false);
+        let addr = self.check_expr(copy_prov.addr, false);
         let (Some(ptr), Some(addr)) = (ptr, addr) else {
             return None;
         };
@@ -859,8 +947,20 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(copy_prov.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_expose_prov(&mut self, expose_prov: ExposeProvenance) -> Option<ExprTypeInfo> {
-        let ptr = self.check_expr(expose_prov.ptr)?;
+    fn check_expose_prov(
+        &mut self,
+        expose_prov: ExposeProvenance,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        if is_global {
+            self.errors.push(TypeCheckError::ProvenanceExprInGlobal {
+                expr_id,
+                span: expose_prov.span,
+            });
+            return None;
+        }
+        let ptr = self.check_expr(expose_prov.ptr, false)?;
         let ptr_type = self.ctx.get_type(ptr.id);
         if !ptr_type.is_ptr() {
             let expr = self.ctx.get_expr(expose_prov.ptr);
@@ -874,8 +974,20 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(expose_prov.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_unexpose_prov(&mut self, unexpose_prov: UnexposeProvenance) -> Option<ExprTypeInfo> {
-        let int = self.check_expr(unexpose_prov.int)?;
+    fn check_unexpose_prov(
+        &mut self,
+        unexpose_prov: UnexposeProvenance,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        if is_global {
+            self.errors.push(TypeCheckError::ProvenanceExprInGlobal {
+                expr_id,
+                span: unexpose_prov.span,
+            });
+            return None;
+        }
+        let int = self.check_expr(unexpose_prov.int, false)?;
         let int_type = self.ctx.get_type(int.id);
         if !int_type.is_int() {
             let expr = self.ctx.get_expr(unexpose_prov.int);
@@ -893,8 +1005,20 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(unexpose_prov.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_new_prov(&mut self, new_prov: NewProvenance) -> Option<ExprTypeInfo> {
-        let ptr = self.check_expr(new_prov.ptr)?;
+    fn check_new_prov(
+        &mut self,
+        new_prov: NewProvenance,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        if is_global {
+            self.errors.push(TypeCheckError::ProvenanceExprInGlobal {
+                expr_id,
+                span: new_prov.span,
+            });
+            return None;
+        }
+        let ptr = self.check_expr(new_prov.ptr, false)?;
         let ptr_type = self.ctx.get_type(ptr.id);
         if !ptr_type.is_ptr() {
             let expr = self.ctx.get_expr(new_prov.ptr);
@@ -945,9 +1069,14 @@ impl<'a> TypeChecker<'a> {
             }
         }
     }
-    fn check_binary_op(&mut self, binop: BinaryOp) -> Option<ExprTypeInfo> {
-        let lhs = self.check_expr(binop.left);
-        let rhs = self.check_expr(binop.right);
+    fn check_binary_op(
+        &mut self,
+        binop: BinaryOp,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        let lhs = self.check_expr(binop.left, is_global);
+        let rhs = self.check_expr(binop.right, is_global);
         let (Some(lhs_info), Some(rhs_info)) = (lhs, rhs) else {
             return None;
         };
@@ -1007,6 +1136,11 @@ impl<'a> TypeChecker<'a> {
             | BinaryOpKind::BitOrAssign
             | BinaryOpKind::XorAssign
             | BinaryOpKind::ModAssign => {
+                if binop.kind.is_assign() && is_global {
+                    self.errors
+                        .push(TypeCheckError::NonConstExprInGlobal { expr_id, span });
+                    return None;
+                }
                 if binop.kind.is_assign() && !lhs_info.assignable {
                     self.errors
                         .push(TypeCheckError::LhsNotAssignable { span, op });
@@ -1078,6 +1212,11 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             BinaryOpKind::AddAssign | BinaryOpKind::SubAssign => {
+                if is_global {
+                    self.errors
+                        .push(TypeCheckError::NonConstExprInGlobal { expr_id, span });
+                    return None;
+                }
                 if !lhs_info.assignable {
                     self.errors
                         .push(TypeCheckError::LhsNotAssignable { span, op });
@@ -1097,6 +1236,11 @@ impl<'a> TypeChecker<'a> {
                 }
             }
             BinaryOpKind::Assign => {
+                if is_global {
+                    self.errors
+                        .push(TypeCheckError::NonConstExprInGlobal { expr_id, span });
+                    return None;
+                }
                 if !lhs_info.assignable {
                     self.errors
                         .push(TypeCheckError::LhsNotAssignable { span, op });
@@ -1123,6 +1267,12 @@ impl<'a> TypeChecker<'a> {
             }
             // Shift by non-constant is caught by AstValidator
             BinaryOpKind::ShlAssign | BinaryOpKind::ShrAssign => {
+                if is_global {
+                    self.errors
+                        .push(TypeCheckError::NonConstExprInGlobal { expr_id, span });
+                    return None;
+                }
+
                 if !lhs.is_int() {
                     let span = self.ctx.get_expr(binop.left).span;
                     self.errors
@@ -1140,12 +1290,24 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(binop.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_prefix_op(&mut self, op: PrefixOp) -> Option<ExprTypeInfo> {
-        let expr_info = self.check_expr(op.expr)?;
-        let expr_id = expr_info.id;
-        let expr_typ = self.ctx.get_type(expr_id);
+    fn check_prefix_op(
+        &mut self,
+        op: PrefixOp,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        let expr_info = self.check_expr(op.expr, is_global)?;
+        let expr_typ_id = expr_info.id;
+        let expr_typ = self.ctx.get_type(expr_typ_id);
         let id = match op.kind {
             PrefixOpKind::Increment | PrefixOpKind::Decrement => {
+                if is_global {
+                    self.errors.push(TypeCheckError::NonConstExprInGlobal {
+                        expr_id,
+                        span: op.span,
+                    });
+                    return None;
+                }
                 if !expr_info.assignable {
                     self.errors.push(TypeCheckError::PrefixExprNotAssignable {
                         span: op.span,
@@ -1155,10 +1317,10 @@ impl<'a> TypeChecker<'a> {
                 }
                 match expr_typ {
                     Type::Int => self.ctx.intern_type(Type::Int),
-                    Type::Ptr { .. } => expr_id,
+                    Type::Ptr { .. } => expr_typ_id,
                     _ => {
                         self.errors.push(TypeCheckError::InvalidPrefixOpType {
-                            expr_id,
+                            expr_id: expr_typ_id,
                             span: op.span,
                             op: op.kind,
                         });
@@ -1171,7 +1333,7 @@ impl<'a> TypeChecker<'a> {
                     self.ctx.intern_type(Type::Int)
                 } else {
                     self.errors.push(TypeCheckError::InvalidPrefixOpType {
-                        expr_id,
+                        expr_id: expr_typ_id,
                         span: op.span,
                         op: op.kind,
                     });
@@ -1181,17 +1343,24 @@ impl<'a> TypeChecker<'a> {
             PrefixOpKind::AddressOf => {
                 if !expr_info.assignable {
                     self.errors.push(TypeCheckError::InvalidAddressOf {
-                        expr_type_id: expr_id,
+                        expr_type_id: expr_typ_id,
                         span: op.span,
                     });
                     return None;
                 }
                 self.ctx.intern_type(Type::Ptr {
-                    pointee: expr_id,
+                    pointee: expr_typ_id,
                     noalias: false,
                 })
             }
             PrefixOpKind::Dereference => {
+                if is_global {
+                    self.errors.push(TypeCheckError::NonConstExprInGlobal {
+                        expr_id,
+                        span: op.span,
+                    });
+                    return None;
+                }
                 if let Type::Ptr { pointee, .. } = expr_typ
                     && let typ = self.ctx.get_type(*pointee)
                     && !matches!(typ, Type::Void)
@@ -1201,7 +1370,7 @@ impl<'a> TypeChecker<'a> {
                     return Some(expr_type_info);
                 } else {
                     self.errors.push(TypeCheckError::InvalidDereference {
-                        expr_type_id: expr_id,
+                        expr_type_id: expr_typ_id,
                         span: op.span,
                     });
                     return None;
@@ -1212,7 +1381,7 @@ impl<'a> TypeChecker<'a> {
                     self.ctx.intern_type(Type::Int)
                 } else {
                     self.errors.push(TypeCheckError::InvalidPrefixOpType {
-                        expr_id,
+                        expr_id: expr_typ_id,
                         span: op.span,
                         op: op.kind,
                     });
@@ -1224,7 +1393,7 @@ impl<'a> TypeChecker<'a> {
                     self.ctx.intern_type(Type::Int)
                 } else {
                     self.errors.push(TypeCheckError::InvalidPrefixOpType {
-                        expr_id,
+                        expr_id: expr_typ_id,
                         span: op.span,
                         op: op.kind,
                     });
@@ -1236,8 +1405,20 @@ impl<'a> TypeChecker<'a> {
         self.type_table.insert(op.id, expr_type_info);
         Some(expr_type_info)
     }
-    fn check_postfix_op(&mut self, op: PostfixOp) -> Option<ExprTypeInfo> {
-        let expr_info = self.check_expr(op.expr)?;
+    fn check_postfix_op(
+        &mut self,
+        op: PostfixOp,
+        is_global: bool,
+        expr_id: ExprId,
+    ) -> Option<ExprTypeInfo> {
+        if is_global {
+            self.errors.push(TypeCheckError::NonConstExprInGlobal {
+                expr_id,
+                span: op.span,
+            });
+            return None;
+        }
+        let expr_info = self.check_expr(op.expr, false)?;
         let expr_id = expr_info.id;
         let expr = self.ctx.get_type(expr_id);
         if !expr_info.assignable {
@@ -1361,39 +1542,51 @@ mod tests {
         assert!(!parsed.has_errors());
         let program = parsed.program;
         let mut globals = Vec::new();
-        let mut funcs = Vec::new();
+        let mut tests = Vec::new();
         for decl in program.decls {
             match decl.kind {
-                GlobalDeclarationKind::Variable(_) => globals.push(decl),
+                GlobalDeclarationKind::Variable(ref v) => {
+                    let s = ctx.get_symbol(v.name.sym);
+                    if s.starts_with('g') {
+                        globals.push(decl);
+                    } else {
+                        tests.push(decl);
+                    }
+                }
                 GlobalDeclarationKind::Struct(_) => globals.push(decl),
                 GlobalDeclarationKind::Function(ref f) => {
                     let s = ctx.get_symbol(f.name.sym);
                     if s.starts_with('u') {
                         globals.push(decl);
                     } else {
-                        funcs.push(decl);
+                        tests.push(decl);
                     }
                 }
             }
         }
-        for func in funcs {
+        for test in tests {
             let mut program = Program { decls: Vec::new() };
-            let GlobalDeclarationKind::Function(f) = &func.kind else {
-                unreachable!();
-            };
             for decl in globals.clone() {
                 program.decls.push(decl);
             }
-            let s = ctx.get_symbol(f.name.sym);
+            let s = match &test.kind {
+                GlobalDeclarationKind::Variable(variable_declaration) => {
+                    ctx.get_symbol(variable_declaration.name.sym)
+                }
+                GlobalDeclarationKind::Function(function_declaration) => {
+                    ctx.get_symbol(function_declaration.name.sym)
+                }
+                _ => unreachable!(),
+            };
             let is_valid = if s.starts_with('v') {
                 true
             } else if s.starts_with('i') {
                 false
             } else {
-                panic!("Function {s} doesn't start with v or i");
+                panic!("Item {s} doesn't start with v or i");
             };
-            println!("Testing function {s}");
-            program.decls.push(func);
+            println!("Testing item {s}");
+            program.decls.push(test);
             let symbol_table_output = SymbolTableBuilder::build(&program, &mut ctx);
             assert!(symbol_table_output.errors.is_empty());
             let symbol_table = symbol_table_output.symbol_table;

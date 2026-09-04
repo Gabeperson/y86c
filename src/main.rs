@@ -1,6 +1,7 @@
 use y86c::analysis::ast_validator::*;
 use y86c::analysis::symbol_table::SymbolTableBuilder;
 use y86c::analysis::type_checker::TypeChecker;
+use y86c::ir::globals::GlobalEvaluator;
 use y86c::ir::lower::Lowerer;
 use y86c::ir::lower_prepass::LoweringPrepass;
 use y86c::ir::print::IrPrinter;
@@ -42,10 +43,19 @@ fn main() {
     let lowerer = Lowerer::new(&mut prepass, &symbol_table, &mut ctx, &type_table);
     let (typectx, functions) = lowerer.lower(&program);
 
-    let printer = IrPrinter::new(&typectx, &ctx.symbol_interner);
-    for function in functions {
-        let res = printer.print(&function).unwrap();
-        println!("{res}");
-        println!();
-    }
+    let globals = match GlobalEvaluator::eval(&program, &ctx, &type_table, &symbol_table) {
+        Ok(globals) => globals,
+        Err(e) => {
+            dbg!(e);
+            std::process::exit(1);
+        }
+    };
+    dbg!(globals);
+
+    // let printer = IrPrinter::new(&typectx, &ctx.symbol_interner);
+    // for function in functions {
+    //     let res = printer.print(&function).unwrap();
+    //     println!("{res}");
+    //     println!();
+    // }
 }
