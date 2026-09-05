@@ -1,7 +1,7 @@
 use y86c::analysis::ast_validator::*;
 use y86c::analysis::symbol_table::SymbolTableBuilder;
 use y86c::analysis::type_checker::TypeChecker;
-use y86c::ir::globals::GlobalEvaluator;
+use y86c::ir::interp::IrInterpreter;
 use y86c::ir::lower::Lowerer;
 use y86c::ir::lower_prepass::LoweringPrepass;
 use y86c::ir::print::IrPrinter;
@@ -49,10 +49,14 @@ fn main() {
         }
     };
 
-    let printer = IrPrinter::new(&ir_program.typectx, &ctx.symbol_interner);
-    for function in &ir_program.functions {
-        let res = printer.print(function).unwrap();
-        println!("{res}");
-        println!();
-    }
+    let mut interp = IrInterpreter::new(&ir_program, &file, &ctx);
+    interp.run();
+    println!("Interpreter successfully ran");
+
+    // let printer = IrPrinter::new(&ir_program.typectx, &ctx.symbol_interner);
+    // for function in ir_program.functions.values() {
+    //     let res = printer.print(function).unwrap();
+    //     println!("{res}");
+    //     println!();
+    // }
 }

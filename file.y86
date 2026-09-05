@@ -1,13 +1,11 @@
-struct Foo {
-    foo: *int,
-}
 fn main() {
-    let f: Foo = bar(Foo {foo: nullptr});
-    assert(f.foo);
+    assert(1);
+    assert(!0);
+    assert(!nullptr);
+}
 
+fn fib(n: int) -> int {
+    if (n <= 1) return n;
+    return fib(n-1) + fib(n-2);
 }
-@[inline(always), cc(abi)]
-fn bar(f: Foo) -> Foo {
-    f.foo = nullptr;
-    return f;
-}
+

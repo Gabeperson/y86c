@@ -25,6 +25,34 @@ impl<'a> std::fmt::Write for Formatter<'a> {
     }
 }
 
+pub(crate) struct IrInstPrinter<'a> {
+    ir_printer: IrPrinter<'a>,
+    counter: Counter,
+    fnctx: Ctx<'a>,
+}
+
+impl<'a> IrInstPrinter<'a> {
+    pub(crate) fn new(
+        func: &'a Function,
+        typectx: &'a TypeContext,
+        symbols: &'a SymbolArena,
+    ) -> Self {
+        Self {
+            ir_printer: IrPrinter::new(typectx, symbols),
+            counter: Counter::new(),
+            fnctx: get_func_ctx(func),
+        }
+    }
+    pub(crate) fn fmt_inst(&mut self, inst_id: InstId) -> String {
+        let mut s = String::new();
+        let mut f = Formatter { writer: &mut s };
+        self.ir_printer
+            .fmt_inst(inst_id, &mut f, &self.fnctx, &mut self.counter)
+            .unwrap();
+        s
+    }
+}
+
 pub struct IrPrinter<'a> {
     typectx: &'a TypeContext,
     symbols: &'a SymbolArena,
@@ -153,7 +181,9 @@ impl<'a> IrPrinter<'a> {
         }
         writeln!(f, ":")?;
         for inst in block.insts.iter().copied() {
+            write!(f, "    ")?;
             self.fmt_inst(inst, f, ctx, counter)?;
+            writeln!(f)?;
         }
         Ok(())
     }
@@ -165,7 +195,6 @@ impl<'a> IrPrinter<'a> {
         counter: &mut Counter,
     ) -> FmtResult {
         let inst = ctx.insts.get(id);
-        write!(f, "    ")?;
         if !inst.results.is_empty() {
             let mut sep = false;
             for res in inst.results.iter().copied() {
@@ -204,7 +233,7 @@ impl<'a> IrPrinter<'a> {
                 self.fmt_provenance(*prov, f, ctx)?;
             }
         }
-        writeln!(f)
+        Ok(())
     }
     fn fmt_value(
         &self,

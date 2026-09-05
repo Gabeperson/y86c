@@ -56,6 +56,9 @@ impl Global {
 
 impl ConstVal {
     pub fn write<F: FnMut(Symbol) -> i64>(&self, buf: &mut [u8], mut f: F) {
+        self.write_inner(buf, &mut f);
+    }
+    pub fn write_inner<F: FnMut(Symbol) -> i64>(&self, buf: &mut [u8], f: &mut F) {
         match self {
             ConstVal::Int(int) => {
                 let bytes = int.to_le_bytes();
@@ -74,7 +77,7 @@ impl ConstVal {
                 for field in fields.iter() {
                     let offset = field.offset as usize;
                     let buf = &mut buf[offset..];
-                    field.elem.write(buf, &mut f);
+                    field.elem.write_inner(buf, f);
                 }
             }
             ConstVal::Array { elem_layout, elems } => {
@@ -82,7 +85,7 @@ impl ConstVal {
                 for (index, elem) in elems.iter().enumerate() {
                     let offset = index * size;
                     let buf = &mut buf[offset..];
-                    elem.write(buf, &mut f)
+                    elem.write_inner(buf, f)
                 }
             }
             ConstVal::Invalid => unreachable!(),

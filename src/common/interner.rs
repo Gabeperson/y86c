@@ -87,6 +87,13 @@ impl<T: Clone + Eq + std::hash::Hash> Interner<T> {
         self.map.insert(item, id);
         id
     }
+    #[track_caller]
+    pub fn get_id_for(&self, item: T) -> Id<T> {
+        if let Some(id) = self.map.get(&item) {
+            return *id;
+        }
+        unreachable!()
+    }
 }
 
 impl<T> Interner<T> {
@@ -145,7 +152,7 @@ impl<T> Interner<T> {
     }
     pub fn fold<I, F: FnMut(I, Id<T>, &T) -> I>(&self, init: I, mut f: F) -> I {
         self.arr.iter().enumerate().fold(init, |acc, (i, item)| {
-            f(acc, Id::new(NonZeroU32::new(i as u32).unwrap()), item)
+            f(acc, Id::new(NonZeroU32::new(i as u32 + 1).unwrap()), item)
         })
     }
 }
@@ -156,6 +163,9 @@ macro_rules! define_id {
         impl $arena {
             pub fn intern_deduplicated(&mut self, item: $typ) -> $id {
                 $id(self.0.intern_deduplicated(item))
+            }
+            pub fn get_id_for(&self, item: $typ) -> $id {
+                $id(self.0.get_id_for(item))
             }
         }
     };
@@ -182,7 +192,7 @@ macro_rules! define_id {
         }
         impl $id {
             pub fn get(self) -> u32 {
-                self.0.get().checked_sub(1).unwrap()
+                self.0.get()
             }
         }
         #[derive(Debug, Clone)]
