@@ -130,6 +130,12 @@ pub enum GlobalEvalError {
         span: Span,
         op: ast::BinaryOpKind,
     },
+    DivByZero {
+        span: Span,
+    },
+    ModByZero {
+        span: Span,
+    },
 }
 
 #[derive(Debug, Copy, Default, Clone)]
@@ -157,7 +163,7 @@ impl<'a> GlobalEvaluator<'a> {
         type_table: &'a AHashMap<ast::NodeId, ExprTypeInfo>,
         symbol_table: &'a SymbolTable,
     ) -> Result<EvaluatedGlobals, Vec<GlobalEvalError>> {
-        let mut globals = AHashMap::new();
+        let mut globals = IndexMap::with_hasher(RandomState::new());
         for decl in &program.decls {
             if let ast::GlobalDeclarationKind::Variable(vardecl) = decl.kind {
                 globals.insert(vardecl.name.sym, vardecl);
@@ -186,7 +192,7 @@ impl<'a> GlobalEvaluator<'a> {
     fn eval_var_decl(
         &mut self,
         decl: ast::VariableDeclaration,
-        globals: &AHashMap<Symbol, ast::VariableDeclaration>,
+        globals: &IndexMap<Symbol, ast::VariableDeclaration, RandomState>,
     ) -> Result<Global, ()> {
         let sym = decl.name.sym;
         if self.error_globals.contains(&sym) {
@@ -219,7 +225,7 @@ impl<'a> GlobalEvaluator<'a> {
     fn eval_expr(
         &mut self,
         expr_id: ExprId,
-        globals: &AHashMap<Symbol, ast::VariableDeclaration>,
+        globals: &IndexMap<Symbol, ast::VariableDeclaration, RandomState>,
     ) -> Result<ConstVal, ()> {
         let expr = self.ctx.get_expr(expr_id);
         match &expr.kind {
@@ -358,7 +364,7 @@ impl<'a> GlobalEvaluator<'a> {
     fn eval_binop(
         &mut self,
         binop: ast::BinaryOp,
-        globals: &AHashMap<Symbol, ast::VariableDeclaration>,
+        globals: &IndexMap<Symbol, ast::VariableDeclaration, RandomState>,
     ) -> Result<ConstVal, ()> {
         let lhs = self.eval_expr(binop.left, globals)?;
         let rhs = self.eval_expr(binop.right, globals)?;
@@ -458,8 +464,8 @@ impl<'a> GlobalEvaluator<'a> {
             _ => unreachable!(),
         };
         Ok(match binop {
-            ast::BinaryOpKind::Mul => ConstVal::Int(lhs * rhs),
-            ast::BinaryOpKind::Div => ConstVal::Int(lhs / rhs),
+            ast::BinaryOpKind::Mul => ConstVal::Int(lhs.wrapping_mul(rhs)),
+            ast::BinaryOpKind::Div => ConstVal::Int(lhs.wrapping_div(rhs)),
             ast::BinaryOpKind::Eq => ConstVal::Int((lhs == rhs) as i64),
             ast::BinaryOpKind::Greater => ConstVal::Int((lhs > rhs) as i64),
             ast::BinaryOpKind::Less => ConstVal::Int((lhs < rhs) as i64),
@@ -471,9 +477,15 @@ impl<'a> GlobalEvaluator<'a> {
             ast::BinaryOpKind::BitAnd => ConstVal::Int(lhs & rhs),
             ast::BinaryOpKind::BitOr => ConstVal::Int(lhs | rhs),
             ast::BinaryOpKind::Xor => ConstVal::Int(lhs ^ rhs),
-            ast::BinaryOpKind::Mod => ConstVal::Int(lhs % rhs),
-            ast::BinaryOpKind::Shl => ConstVal::Int(lhs << rhs),
-            ast::BinaryOpKind::Shr => ConstVal::Int(lhs >> rhs),
+            ast::BinaryOpKind::Mod => {
+                if rhs == 0 {
+                    self.errors.push(GlobalEvalError::ModByZero { span });
+                    return Err(());
+                }
+                ConstVal::Int(lhs.wrapping_rem(rhs))
+            }
+            ast::BinaryOpKind::Shl => ConstVal::Int(lhs.wrapping_shl(rhs as u32)),
+            ast::BinaryOpKind::Shr => ConstVal::Int(lhs.wrapping_shr(rhs as u32)),
 
             _ => unreachable!(),
         })
@@ -481,7 +493,7 @@ impl<'a> GlobalEvaluator<'a> {
     fn eval_prefixop(
         &mut self,
         prefixop: ast::PrefixOp,
-        globals: &AHashMap<Symbol, ast::VariableDeclaration>,
+        globals: &IndexMap<Symbol, ast::VariableDeclaration, RandomState>,
     ) -> Result<ConstVal, ()> {
         if let ast::PrefixOpKind::AddressOf = prefixop.kind {
             return self.eval_expr_addrof(prefixop.expr, globals);
@@ -496,7 +508,7 @@ impl<'a> GlobalEvaluator<'a> {
                 let ConstVal::Int(int) = expr else {
                     unreachable!("Checked by type checker");
                 };
-                Ok(ConstVal::Int(-int))
+                Ok(ConstVal::Int(int.wrapping_neg()))
             }
             ast::PrefixOpKind::Not => {
                 let ConstVal::Int(int) = expr else {
@@ -521,7 +533,7 @@ impl<'a> GlobalEvaluator<'a> {
     fn eval_expr_addrof(
         &mut self,
         expr_id: ExprId,
-        globals: &AHashMap<Symbol, ast::VariableDeclaration>,
+        globals: &IndexMap<Symbol, ast::VariableDeclaration, RandomState>,
     ) -> Result<ConstVal, ()> {
         let expr = self.ctx.get_expr(expr_id);
         match expr.kind {
@@ -534,7 +546,7 @@ impl<'a> GlobalEvaluator<'a> {
                 let ConstVal::Addr { sym, add } = array else {
                     unreachable!("Checked by type checker");
                 };
-                let index = self.eval_expr(expr_id, globals)?;
+                let index = self.eval_expr(array_index.index, globals)?;
                 let ConstVal::Int(idx) = index else {
                     unreachable!("Chcked by type checker");
                 };
@@ -547,7 +559,7 @@ impl<'a> GlobalEvaluator<'a> {
                 })
             }
             ast::ExprKind::MemberAccess(member_access) => {
-                let s = self.eval_expr_addrof(expr_id, globals)?;
+                let s = self.eval_expr_addrof(member_access.struct_expr, globals)?;
                 let ConstVal::Addr { sym, add } = s else {
                     unreachable!("Checked by type checker");
                 };
@@ -571,7 +583,7 @@ impl<'a> GlobalEvaluator<'a> {
     fn get_layout_of_type(&self, type_id: TypeId) -> Layout {
         let typ = self.ctx.get_type(type_id);
         match typ {
-            ast::Type::Void => unreachable!(),
+            ast::Type::Void => Layout::new(1, 1),
             ast::Type::Int => Layout::new(8, 8),
             ast::Type::Ptr { .. } => Layout::new(8, 8),
             ast::Type::Struct { name } => {
@@ -605,7 +617,7 @@ impl<'a> GlobalEvaluator<'a> {
         binop: ast::BinaryOpKind,
     ) -> Result<ConstVal, ()> {
         if let ConstVal::Int(int) = lhs {
-            return Ok(ConstVal::Int(int * rhs));
+            return Ok(ConstVal::Int(int.wrapping_mul(rhs)));
         }
         if let ConstVal::Addr { sym, .. } = lhs {
             self.errors.push(GlobalEvalError::InvalidOpForLabel {
@@ -624,8 +636,12 @@ impl<'a> GlobalEvaluator<'a> {
         span: Span,
         binop: ast::BinaryOpKind,
     ) -> Result<ConstVal, ()> {
+        if rhs == 0 {
+            self.errors.push(GlobalEvalError::DivByZero { span });
+            return Err(());
+        }
         if let ConstVal::Int(int) = lhs {
-            return Ok(ConstVal::Int(int / rhs));
+            return Ok(ConstVal::Int(int.wrapping_div(rhs)));
         }
         if let ConstVal::Addr { sym, .. } = lhs {
             self.errors.push(GlobalEvalError::InvalidOpForLabel {
@@ -639,14 +655,14 @@ impl<'a> GlobalEvaluator<'a> {
     }
     fn add(&mut self, lhs: ConstVal, rhs: ConstVal, span: Span) -> Result<ConstVal, ()> {
         match (lhs, rhs) {
-            (ConstVal::Int(lhs), ConstVal::Int(rhs)) => Ok(ConstVal::Int(lhs + rhs)),
+            (ConstVal::Int(lhs), ConstVal::Int(rhs)) => Ok(ConstVal::Int(lhs.wrapping_add(rhs))),
             (ConstVal::Addr { sym, add }, ConstVal::Int(rhs)) => Ok(ConstVal::Addr {
                 sym,
-                add: add + rhs,
+                add: add.wrapping_add(rhs),
             }),
             (ConstVal::Int(lhs), ConstVal::Addr { sym, add }) => Ok(ConstVal::Addr {
                 sym,
-                add: lhs + add,
+                add: lhs.wrapping_add(add),
             }),
             (ConstVal::Addr { sym: s1, .. }, ConstVal::Addr { sym: s2, .. }) => {
                 self.errors.push(GlobalEvalError::DoubleLabelMath {

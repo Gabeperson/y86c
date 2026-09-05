@@ -347,7 +347,9 @@ impl<'a> FunctionLowerer<'a> {
         let mem_typ = self.typectx.mem_typ();
         let start_mem_val = self.function.new_undef(mem_typ, self.ctx);
         self.write_variable(VarId::Mem, entry_block, start_mem_val);
-        _ = self.lower_block(&decl.body, entry_block, None);
+        if let ControlFlow::Continue(next) = self.lower_block(&decl.body, entry_block, None) {
+            self.new_inst0(Opcode::Return, next, decl.span, &[]);
+        }
     }
     fn lower_block(
         &mut self,
@@ -819,13 +821,14 @@ impl<'a> FunctionLowerer<'a> {
         let var_id = self.prepass.get_node_varid(ident.id);
         let var = self.prepass.get_var(var_id);
         if var.is_global {
-            let typ = self.ast_to_ir_type(var.typ);
+            let ptr_typ = self.typectx.ptr_typ();
             let (val_id, _, _, inst) =
-                self.new_inst1(Opcode::LoadGlobalLoc, block_id, ident.span, &[], typ);
+                self.new_inst1(Opcode::LoadGlobalLoc, block_id, ident.span, &[], ptr_typ);
             inst.extra = InstExtraData::Global(ident.sym);
             if var.is_function {
                 return (Place::ssa(val_id), block_id);
             } else {
+                let typ = self.ast_to_ir_type(var.typ);
                 return (Place::ptr(val_id, ident.span, typ), block_id);
             }
         }

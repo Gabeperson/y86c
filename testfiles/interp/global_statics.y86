@@ -1,0 +1,157 @@
+fn main() {
+    assert(a == 1);
+    assert(c == 1);
+    assert(d.x == 1);
+    assert(a == *b);
+    assert(&a == b);
+    a = 2;    
+    assert(*b == 2);
+    assert(c == 1);
+    assert(d.x == 1);
+    assert(d1 == 1);
+    assert(*d2 == 1);
+    d.x = 10;
+    assert(d1 == 1);
+    assert(*d2 == 10);
+    assert(e.arr[0] == 1);
+    assert(e.arr[1] == 2);
+    assert(e.arr[2] == 3);
+    assert(e.arr[3] == 4);
+    assert(e.arr[4] == 5);
+    assert(*e1 == 1);
+    assert(*e2 == 2);
+    assert(*e3 == 3);
+    assert(*e4 == 4);
+    assert(*e5 == 5);
+    for (let i: int = 0; i < 5; i++) {
+        e.arr[i] = i;
+    }
+    assert(*e1 == 0);
+    assert(*e2 == 1);
+    assert(*e3 == 2);
+    assert(*e4 == 3);
+    assert(*e5 == 4);
+
+    for (let i: int = 0; i < 5; i++) {
+        assert(f.inner.arr[i] == i+1);
+    }
+
+    for (let i: int = 0; i < 5; i++) {
+        assert(g.nested.inner.arr[i] == i+1);
+    }
+
+    for (let i: int = 0; i < 5; i++) {
+        assert(g.arr.arr[i] == i+1);
+    }
+
+    assert(&g == g.ptrarr[0]);
+    assert(&g == g.ptrarr[1]);
+    assert(&g == g.ptrarr[1]->ptrarr[0]);
+    assert(&g == g.ptrarr[1]->ptrarr[0]->ptrarr[1]);
+    assert(&g == g.ptrarr[1]->ptrarr[0]->ptrarr[1]->ptrarr[0]);
+    let g_base: *void = &g;
+    assert(&g.nested == g_base);
+    assert(&g.nested.inner.arr[0] == g_base);
+    assert(&g.nested.inner.arr[1] == g_base + 8);
+    assert(&g.nested.inner.arr[2] == g_base + 16);
+    assert(&g.nested.inner.arr[3] == g_base + 24);
+    assert(&g.nested.inner.arr[4] == g_base + 32);
+    assert(&g.arr == g_base + 40);
+    assert(&g.arr.arr[0] == g_base + 40);
+    assert(&g.arr.arr[1] == g_base + 48);
+    assert(&g.arr.arr[2] == g_base + 56);
+    assert(&g.arr.arr[3] == g_base + 64);
+    assert(&g.arr.arr[4] == g_base + 72);
+    assert(&g.ptrarr == g_base + 80);
+    assert(&g.ptrarr[0] == g_base + 80);
+    assert(&g.ptrarr[1] == g_base + 88);
+
+    assert(arr[0][0][0] == 1);
+    assert(arr[0][0][1] == 2);
+    assert(arr[0][1][0] == 1);
+    assert(arr[0][1][1] == 2);
+
+    arr[0][1][1] = 10;
+    assert(arr[0][0][0] == 1);
+    assert(arr[0][0][1] == 2);
+    assert(arr[0][1][0] == 1);
+    assert(arr[0][1][1] == 10);
+
+    let arr_base: *void = &arr;
+    assert(&arr == arr_base);
+    assert(&arr[0] == arr_base);
+    assert(&arr[0][0] == arr_base);
+    assert(&arr[0][0][0] == arr_base);
+    assert(&arr[0][0][1] == arr_base + 8);
+    assert(&arr[0][1] == arr_base + 16);
+    assert(&arr[0][1][0] == arr_base + 16);
+    assert(&arr[0][1][1] == arr_base + 24);
+    assert(&arr[1] == arr_base + 32);
+    assert(&arr[1][0] == arr_base + 32);
+    assert(&arr[1][0][0] == arr_base + 32);
+
+    assert(&arr[1][0][1] == arr_base + 40);
+    assert(&arr[1][1] == arr_base + 48);
+    assert(&arr[1][1][0] == arr_base + 48);
+    assert(&arr[1][1][1] == arr_base + 56);
+
+    assert(*(x as **void) == &x);
+    assert(*(x as **int) == x);
+    assert(*(x as **void) == x);
+}
+
+
+
+struct Int {
+    x: int,
+}
+
+struct Arr {
+    arr: [int; 5],
+}
+
+struct Nested {
+    inner: Arr,
+}
+
+struct VeryNested {
+    nested: Nested,
+    arr: Arr,
+    ptrarr: [*VeryNested; 2],
+}
+
+
+let a: int = 1;
+let b: *int = &a;
+let c: int = a;
+let d: Int = Int { x: a };
+let d1: int = d.x;
+let d2: *int = &d.x;
+
+let e: Arr = Arr {
+    arr: [1, 2, 3, 4, 5],
+};
+let e1: *int = &e.arr[0];
+let e2: *int = &e.arr[1];
+let e3: *int = &e.arr[2];
+let e4: *int = &e.arr[3];
+let e5: *int = &e.arr[4];
+
+let f: Nested = Nested {
+    inner: e,
+};
+
+
+let g: VeryNested = VeryNested {
+    nested: f,
+    arr: e,
+    ptrarr: [&g, &g],
+};
+
+
+let arr: [[[int; 2]; 2]; 1] = [[[1, 2], [1, 2]]];
+
+
+
+let x: *void = &x;
+

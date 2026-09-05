@@ -14,6 +14,7 @@ pub struct AstValidator {
     pub errors: Vec<AstValidationError>,
     global_var_scope: AHashMap<Symbol, Span>,
     struct_scope: AHashMap<Symbol, Span>,
+    neg_int: bool,
 }
 
 impl AstValidator {
@@ -25,6 +26,7 @@ impl AstValidator {
             errors: Vec::new(),
             global_var_scope: AHashMap::new(),
             struct_scope: AHashMap::new(),
+            neg_int: false,
         };
         validator.visit_program(ast, ctx);
         validator.errors
@@ -88,17 +90,38 @@ pub enum AstValidationError {
     InvalidNoAlias {
         span: Span,
     },
-    NonConstShiftBy {
+    InvalidShiftBy {
         expr: ExprId,
     },
-    ShiftByNegative {
-        num: Span,
+    I64MinWithoutMinus {
+        span: Span,
     },
 }
 
 impl AstVisitor for AstValidator {
     fn visit_type(&mut self, _typ: &Type, _ctx: &Context) {
         unreachable!()
+    }
+
+    fn visit_expr(&mut self, expr: &Expr, ctx: &Context) {
+        self.neg_int = false;
+        walk_expr(self, expr, ctx);
+        self.neg_int = false;
+    }
+
+    fn visit_int(&mut self, expr: &Int, ctx: &Context) {
+        if expr.lit == i64::MIN && !self.neg_int && expr.radix == 10 {
+            self.errors
+                .push(AstValidationError::I64MinWithoutMinus { span: expr.span });
+        }
+        _ = ctx;
+    }
+    fn visit_prefix_op(&mut self, expr: &PrefixOp, ctx: &Context) {
+        if let PrefixOpKind::UnaryMinus = expr.kind {
+            self.visit_expr_negint(ctx.get_expr(expr.expr), ctx);
+            return;
+        }
+        self.visit_expr(ctx.get_expr(expr.expr), ctx);
     }
 
     fn visit_typenode(&mut self, typ: &TypeNode, ctx: &Context) {
@@ -125,14 +148,11 @@ impl AstVisitor for AstValidator {
         | BinaryOpKind::ShrAssign = expr.kind
         {
             let right = ctx.get_expr(expr.right);
-            if let ExprKind::Int(Int { lit, span, .. }) = right.kind {
-                if lit.is_negative() {
-                    self.errors
-                        .push(AstValidationError::ShiftByNegative { num: span })
-                }
-            } else {
-                self.errors
-                    .push(AstValidationError::NonConstShiftBy { expr: expr.right })
+            match right.kind {
+                ExprKind::Int(Int { .. }) => {}
+                _ => self
+                    .errors
+                    .push(AstValidationError::InvalidShiftBy { expr: expr.right }),
             }
         }
     }
@@ -287,6 +307,11 @@ impl AstVisitor for AstValidator {
 }
 
 impl AstValidator {
+    fn visit_expr_negint(&mut self, expr: &Expr, ctx: &Context) {
+        self.neg_int = true;
+        walk_expr(self, expr, ctx);
+        self.neg_int = false;
+    }
     fn visit_type_impl(
         &mut self,
         typ: &Type,
@@ -515,5 +540,15 @@ mod tests {
         assert_success("let x: int = 1 << 1 << 1;", true);
         assert_fail("let x: int = 1 << x;", true);
         assert_fail("let x: int = 1 << 1+1;", true);
+
+        assert_success("let x: int = -9223372036854775808;", true);
+        assert_success("let x: int = 9223372036854775807;", true);
+        assert_fail("let x: int = 9223372036854775808;", true);
+
+        assert_fail("let x: int = -+9223372036854775808;", true);
+        assert_fail("let x: int = -(1+9223372036854775808);", true);
+        assert_fail("let x: int = -(9223372036854775808+1);", true);
+        assert_fail("let x: int = - (9223372036854775808 ? 1 : 0);", true);
+        assert_fail("let x: int = -~9223372036854775808;", true);
     }
 }

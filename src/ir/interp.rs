@@ -83,7 +83,7 @@ impl<'a> IrInterpreter<'a> {
             };
             let inst = func.insts.get(inst_id);
             {
-                println!("{}", printer.fmt_inst(inst_id));
+                // println!("{}", printer.fmt_inst(inst_id));
             }
             self.instruction_count += 1;
             match inst.op {
@@ -129,7 +129,10 @@ impl<'a> IrInterpreter<'a> {
                     assert_eq!(inst.operands.len(), 1);
                     let cond = values[&inst.operands[0]];
                     if cond == 0 {
-                        panic!("Assertion failed");
+                        panic!(
+                            "Assertion failed at:\n{}",
+                            &self.program_text[inst.span.start as usize..inst.span.end as usize]
+                        );
                     }
                 }
                 Opcode::Param => {
@@ -144,16 +147,20 @@ impl<'a> IrInterpreter<'a> {
                 Opcode::Phi => {
                     assert_eq!(inst.results.len(), 1);
                     assert_eq!(inst.operands.len(), 0);
-                    let InstExtraData::Phi { operands } = &inst.extra else {
-                        unreachable!();
-                    };
-                    let val_id = operands
-                        .iter()
-                        .find(|op| op.block == prev_block_id)
-                        .map(|op| op.value)
-                        .unwrap();
-                    let val = values[&val_id];
-                    values.insert(inst.results[0], val);
+                    let val = func.values.get(inst.results[0]);
+                    // If memphi, we ignore
+                    if val.typ != typectx.mem_typ() {
+                        let InstExtraData::Phi { operands } = &inst.extra else {
+                            unreachable!();
+                        };
+                        let val_id = operands
+                            .iter()
+                            .find(|op| op.block == prev_block_id)
+                            .map(|op| op.value)
+                            .unwrap();
+                        let val = values[&val_id];
+                        values.insert(inst.results[0], val);
+                    }
                 }
                 Opcode::Jmp => {
                     assert_eq!(inst.results.len(), 0);
@@ -164,6 +171,7 @@ impl<'a> IrInterpreter<'a> {
                     prev_block_id = block_id;
                     block_id = target;
                     inst_idx = 0;
+                    continue;
                 }
                 Opcode::Branch => {
                     assert_eq!(inst.results.len(), 0);
@@ -183,6 +191,7 @@ impl<'a> IrInterpreter<'a> {
                         block_id = else_target;
                     }
                     inst_idx = 0;
+                    continue;
                 }
                 Opcode::LoadConst => {
                     assert_eq!(inst.results.len(), 1);
@@ -358,10 +367,10 @@ impl<'a> IrInterpreter<'a> {
 
 fn binop(lhs: i64, rhs: i64, op: Opcode) -> i64 {
     match op {
-        Opcode::Add => lhs + rhs,
-        Opcode::Sub => lhs - rhs,
-        Opcode::Mul => lhs * rhs,
-        Opcode::Div => lhs / rhs,
+        Opcode::Add => lhs.wrapping_add(rhs),
+        Opcode::Sub => lhs.wrapping_sub(rhs),
+        Opcode::Mul => lhs.wrapping_mul(rhs),
+        Opcode::Div => lhs.wrapping_div(rhs),
         Opcode::Eq => (lhs == rhs) as i64,
         Opcode::NotEq => (lhs != rhs) as i64,
         Opcode::Greater => (lhs > rhs) as i64,
@@ -373,16 +382,16 @@ fn binop(lhs: i64, rhs: i64, op: Opcode) -> i64 {
         Opcode::BitAnd => lhs & rhs,
         Opcode::BitOr => lhs | rhs,
         Opcode::Xor => lhs ^ rhs,
-        Opcode::Mod => lhs % rhs,
-        Opcode::Shl => lhs << rhs,
-        Opcode::Shr => lhs >> rhs,
+        Opcode::Mod => lhs.wrapping_rem(rhs),
+        Opcode::Shl => lhs.wrapping_shl(rhs as u32),
+        Opcode::Shr => lhs.wrapping_shr(rhs as u32),
         _ => unreachable!(),
     }
 }
 
 fn prefixop(val: i64, op: Opcode) -> i64 {
     match op {
-        Opcode::Neg => -val,
+        Opcode::Neg => val.wrapping_neg(),
         Opcode::BitNot => !val,
         Opcode::Not => (val == 0) as i64,
         _ => unreachable!(),

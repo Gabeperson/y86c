@@ -12,30 +12,34 @@ fn main() {
     let file = std::fs::read_to_string("file.y86").unwrap();
     let mut ctx = Context::new();
     let lexed = Lexer::lex(&file, &mut ctx);
+    let mut has_err = false;
     if lexed.has_errors() {
         dbg!(lexed.errors);
-        std::process::exit(1);
+        has_err = true;
     }
     let parsed = Parser::parse_test(&lexed.tokens, &mut ctx);
     if parsed.has_errors() {
         dbg!(parsed.errors);
-        std::process::exit(1);
+        has_err = true;
     }
     let program = parsed.program;
     let validation_errs = AstValidator::validate(&program, true, &ctx);
     if !validation_errs.is_empty() {
         dbg!(validation_errs);
-        std::process::exit(1);
+        has_err = true;
     }
     let symbol_res = SymbolTableBuilder::build(&program, &mut ctx);
     if !symbol_res.errors.is_empty() {
         dbg!(symbol_res.errors);
-        std::process::exit(1);
+        has_err = true;
     }
     let symbol_table = symbol_res.symbol_table;
     let type_check_res = TypeChecker::check(&mut ctx, &symbol_table, &program);
     if !type_check_res.errors.is_empty() {
         dbg!(type_check_res.errors);
+        has_err = true;
+    }
+    if (has_err) {
         std::process::exit(1);
     }
     let type_table = type_check_res.type_table;
@@ -48,15 +52,14 @@ fn main() {
             std::process::exit(1);
         }
     };
+    let printer = IrPrinter::new(&ir_program.typectx, &ctx.symbol_interner);
+    for function in ir_program.functions.values() {
+        let res = printer.print(function).unwrap();
+        println!("{res}");
+        println!();
+    }
 
     let mut interp = IrInterpreter::new(&ir_program, &file, &ctx);
     interp.run();
     println!("Interpreter successfully ran");
-
-    // let printer = IrPrinter::new(&ir_program.typectx, &ctx.symbol_interner);
-    // for function in ir_program.functions.values() {
-    //     let res = printer.print(function).unwrap();
-    //     println!("{res}");
-    //     println!();
-    // }
 }

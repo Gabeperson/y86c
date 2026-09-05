@@ -5,7 +5,7 @@ use smol_str::SmolStr;
 use crate::common::symbol::Symbol;
 use crate::{common::span::Span, syntax::context::Context};
 
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Copy)]
 pub enum KeywordKind {
     As,
     Nullptr,
@@ -34,7 +34,7 @@ pub enum KeywordKind {
 pub enum TokenKind {
     Keyword(KeywordKind),
     Ident(Symbol),
-    IntLiteral { value: u64, minus: bool },
+    IntLiteral(u64, u32),
     Plus,
     Minus,
     Asterisk,
@@ -206,7 +206,7 @@ impl<'a> Lexer<'a> {
         };
         self.tokens.push(Token { kind, span });
     }
-    fn handle_number(&mut self, c: char, start: u32, minus: bool) {
+    fn handle_number(&mut self, c: char, start: u32) {
         let (radix, offset) = match self.iter.peek() {
             Some((_, 'x')) | Some((_, 'X')) if c == '0' => {
                 self.iter.next();
@@ -221,13 +221,8 @@ impl<'a> Lexer<'a> {
                 let Some(num) = c.to_digit(10) else {
                     unreachable!();
                 };
-                self.tokens.push(Token::new(
-                    TokenKind::IntLiteral {
-                        value: num as u64,
-                        minus,
-                    },
-                    span,
-                ));
+                self.tokens
+                    .push(Token::new(TokenKind::IntLiteral(num as u64, 10), span));
                 return;
             }
             _ => (10, 0),
@@ -254,10 +249,8 @@ impl<'a> Lexer<'a> {
                 return;
             }
         };
-        self.tokens.push(Token::new(
-            TokenKind::IntLiteral { value: num, minus },
-            span,
-        ));
+        self.tokens
+            .push(Token::new(TokenKind::IntLiteral(num, radix), span));
     }
     fn handle_operator(&mut self, c: char, start: u32) {
         let kind = match c {
@@ -284,11 +277,6 @@ impl<'a> Lexer<'a> {
                 Some((_, '>')) => {
                     self.iter.next();
                     TokenKind::Arrow
-                }
-                Some((_, '0'..='9')) => {
-                    let (idx, c) = self.iter.next().expect("We just checked");
-                    self.handle_number(c, idx as u32, true);
-                    return;
                 }
                 _ => TokenKind::Minus,
             },
@@ -432,7 +420,7 @@ impl<'a> Lexer<'a> {
             }
             match CharType::of(curr) {
                 CharType::Alpha => self.handle_ident(curr, index as u32, ctx),
-                CharType::Num => self.handle_number(curr, index as u32, false),
+                CharType::Num => self.handle_number(curr, index as u32),
                 CharType::Whitespace => {}
                 CharType::Punctutation => self.handle_operator(curr, index as u32),
                 CharType::Bracket => self.handle_brackets(curr, index as u32),
@@ -519,103 +507,33 @@ fn test_lexer() {
     test_ident("_");
     test_ident("_______1521521512512");
 
-    test(
-        "0",
-        TokenKind::IntLiteral {
-            value: 0,
-            minus: false,
-        },
-    );
-    test(
-        "1",
-        TokenKind::IntLiteral {
-            value: 1,
-            minus: false,
-        },
-    );
-    test(
-        "1000000000",
-        TokenKind::IntLiteral {
-            value: 1000000000,
-            minus: false,
-        },
-    );
+    test("0", TokenKind::IntLiteral(0, 10));
+    test("1", TokenKind::IntLiteral(1, 10));
+    test("1000000000", TokenKind::IntLiteral(1000000000, 10));
     test(
         "000000000000000000000000000000000000000000000000000000000000000000",
-        TokenKind::IntLiteral {
-            value: 0,
-            minus: false,
-        },
+        TokenKind::IntLiteral(0, 10),
     );
     test(
         "18446744073709551615",
-        TokenKind::IntLiteral {
-            value: 18446744073709551615,
-            minus: false,
-        },
+        TokenKind::IntLiteral(18446744073709551615, 10),
     );
-    test(
-        "-18446744073709551615",
-        TokenKind::IntLiteral {
-            value: 18446744073709551615,
-            minus: true,
-        },
-    );
-    test(
-        &u64::MAX.to_string(),
-        TokenKind::IntLiteral {
-            value: u64::MAX,
-            minus: false,
-        },
-    );
-    test(
-        "0x0",
-        TokenKind::IntLiteral {
-            value: 0,
-            minus: false,
-        },
-    );
-    test(
-        "0x1",
-        TokenKind::IntLiteral {
-            value: 1,
-            minus: false,
-        },
-    );
+    test(&u64::MAX.to_string(), TokenKind::IntLiteral(u64::MAX, 10));
+    test("0x0", TokenKind::IntLiteral(0, 16));
+    test("0x1", TokenKind::IntLiteral(1, 16));
     test(
         "0xFFFFFFFFFFFFFFFF",
-        TokenKind::IntLiteral {
-            value: 0xFFFFFFFFFFFFFFFF,
-            minus: false,
-        },
+        TokenKind::IntLiteral(0xFFFFFFFFFFFFFFFF, 16),
     );
-    test(
-        "0b0",
-        TokenKind::IntLiteral {
-            value: 0,
-            minus: false,
-        },
-    );
-    test(
-        "0b1",
-        TokenKind::IntLiteral {
-            value: 1,
-            minus: false,
-        },
-    );
-    test(
-        "0b10",
-        TokenKind::IntLiteral {
-            value: 2,
-            minus: false,
-        },
-    );
+    test("0b0", TokenKind::IntLiteral(0, 2));
+    test("0b1", TokenKind::IntLiteral(1, 2));
+    test("0b10", TokenKind::IntLiteral(2, 2));
     test(
         "0b0000000011111111000000001111111100000000111111110000000011111111",
-        TokenKind::IntLiteral {
-            value: 0b0000000011111111000000001111111100000000111111110000000011111111,
-            minus: false,
-        },
+        TokenKind::IntLiteral(
+            0b0000000011111111000000001111111100000000111111110000000011111111,
+            2,
+        ),
     );
 
     test("+", TokenKind::Plus);

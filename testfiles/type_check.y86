@@ -453,9 +453,11 @@ fn v_eq1() { let a: int = u_void == nullptr; }
 fn v_eq2() { let a: int = nullptr == u_void; }
 fn v_eq3() { let a: int = u_void == u_void; }
 fn v_eq4() { let a: int = nullptr == nullptr; }
+fn v_eq8() { nullptr == nullptr as *int; }
 fn v_eq5() { let a: int = 1 == 1; }
 fn i_eq6() { Struct {} == Struct {}; }
 fn i_eq7() { [1] == [2]; }
+fn i_eq8() { 0 as **int == 0 as *int; }
 
 fn v_neq1() { let a: int = u_void != nullptr; }
 fn v_neq2() { let a: int = nullptr != u_void; }
@@ -538,22 +540,22 @@ fn i_unary6() { -Struct {}; }
 fn i_unary7() { -[10]; }
 
 fn v_not1() { let a: int = !1; }
-fn v_not3() { let a: int = !0 as *void; }
-fn v_not4() { let a: int = !0 as *int; }
+fn v_not3() { let a: int = !(0 as *void); }
+fn v_not4() { let a: int = !(0 as *int); }
 fn v_not5() { let a: int = !u_void; }
 fn i_not6() { let a: int = !Something; }
 fn i_not7() { let a: int = ![1]; }
 fn i_not8() { let a: int = !u_void(); }
 
 fn v_bitnot1() { let a: int = ~1; }
-fn i_bitnot3() { let a: int = ~0 as *void; }
-fn i_bitnot4() { let a: int = ~0 as *int; }
+fn i_bitnot3() { let a: int = ~(0 as *void); }
+fn i_bitnot4() { let a: int = ~(0 as *int); }
 fn i_bitnot5() { let a: int = ~u_void; }
 fn i_bitnot6() { let a: int = ~Something; }
 fn i_bitnot7() { let a: int = ~[1]; }
 fn i_bitnot8() { let a: int = ~u_void(); }
 
-fn v_deref() { let a: int = *1 as *int; }
+fn v_deref() { let a: int = *(1 as *int); }
 fn v_deref() { let a: int; a = *&a; }
 fn v_deref() {
     let a: *int;

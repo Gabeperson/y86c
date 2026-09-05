@@ -340,6 +340,7 @@ impl CtxEq for Ident {
 #[derive(Debug, Clone)]
 pub struct Int {
     pub lit: i64,
+    pub radix: u32,
     pub span: Span,
     pub id: NodeId,
 }

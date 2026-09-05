@@ -1185,9 +1185,22 @@ impl<'a> TypeChecker<'a> {
                 {
                     self.ctx.intern_type(Type::Int)
                 }
-                (Type::FuncPtr { .. }, Type::FuncPtr { .. })
-                | (Type::Int, Type::Int)
-                | (Type::Ptr { .. }, Type::Ptr { .. }) => self.ctx.intern_type(Type::Int),
+                (Type::FuncPtr { .. }, Type::FuncPtr { .. }) | (Type::Int, Type::Int) => {
+                    self.ctx.intern_type(Type::Int)
+                }
+                (Type::Ptr { pointee: p1, .. }, Type::Ptr { pointee: p2, .. }) if p1 == p2 => {
+                    self.ctx.intern_type(Type::Int)
+                }
+                (Type::Ptr { pointee, .. }, Type::Ptr { .. })
+                    if let Type::Void = self.ctx.get_type(*pointee) =>
+                {
+                    self.ctx.intern_type(Type::Int)
+                }
+                (Type::Ptr { .. }, Type::Ptr { pointee, .. })
+                    if let Type::Void = self.ctx.get_type(*pointee) =>
+                {
+                    self.ctx.intern_type(Type::Int)
+                }
                 _ => {
                     self.errors.push(TypeCheckError::InvalidBinopTypes {
                         lhs_id,

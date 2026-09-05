@@ -35,10 +35,7 @@ pub enum ParsingError {
         found: Token,
     },
     IntLiteralOutOfRange {
-        found: Token,
-    },
-    NegativeArrayLen {
-        len_tok: Token,
+        span: Span,
     },
     ExpectedAttrParam {
         found: Token,
@@ -497,31 +494,22 @@ impl<'t> Parser<'t> {
                     "Expected ';' in array type separating element type and size",
                 )?;
                 let token = self.current()?;
-                let TokenKind::IntLiteral { value, minus } = token.kind else {
+                let TokenKind::IntLiteral(len, _) = token.kind else {
                     return Err(ParsingError::ExpectedArraySize { found: token });
                 };
-                let size = if minus {
-                    self.errors.push(ParsingError::NegativeArrayLen {
-                        len_tok: token.clone(),
-                    });
-                    1
-                } else if value > i64::MAX as u64 {
-                    self.errors.push(ParsingError::IntLiteralOutOfRange {
-                        found: token.clone(),
-                    });
+                let len = if len > i64::MAX as u64 {
+                    self.errors
+                        .push(ParsingError::IntLiteralOutOfRange { span: token.span });
                     1
                 } else {
-                    value
+                    len
                 } as i64;
 
                 self.advance();
                 let end_tok =
                     self.expect(TokenKind::RSquare, "Expected ']' at end of array type")?;
                 Ok((
-                    Type::Array {
-                        element_type,
-                        len: size,
-                    },
+                    Type::Array { element_type, len },
                     Span::new(token.span.start, end_tok.span.end),
                 ))
             }
@@ -962,13 +950,26 @@ impl<'t> Parser<'t> {
         let current = self.current()?;
         match current.kind {
             TokenKind::Ident(_) => Ok(AttrParam::Ident(self.parse_ident(ctx)?)),
-            TokenKind::IntLiteral { value, minus } => {
+            TokenKind::IntLiteral(num, _) => {
                 self.advance();
                 Ok(AttrParam::Num {
-                    int: value,
-                    minus,
+                    int: num,
+                    minus: false,
                     span: current.span,
                 })
+            }
+            TokenKind::Minus => {
+                let next = self.next()?;
+                if let TokenKind::IntLiteral(num, _) = next.kind {
+                    self.advancen(2);
+                    Ok(AttrParam::Num {
+                        int: num,
+                        minus: true,
+                        span: Span::new(current.span.start, next.span.end),
+                    })
+                } else {
+                    Err(ParsingError::ExpectedAttrParam { found: current })
+                }
             }
             _ => Err(ParsingError::ExpectedAttrParam { found: current }),
         }
@@ -1116,15 +1117,15 @@ impl<'t> Parser<'t> {
                 Ok(Some(expr))
             }
             TokenKind::LSquare => Ok(Some(self.parse_array_init(ctx)?)),
-            TokenKind::IntLiteral { value, minus } => {
+            TokenKind::IntLiteral(int, radix) => {
                 self.advance();
                 let span = token.span;
-                let value: i64 = match (value, minus) {
-                    v @ (0..=9_223_372_036_854_775_807, false) => v.0 as i64,
-                    v @ (0..=9_223_372_036_854_775_808, true) => (v.0 as i64).wrapping_neg(),
+                let value: i64 = match (int, radix) {
+                    v @ (0..=9_223_372_036_854_775_808, 10) => v.0 as i64,
+                    v @ (_, 16 | 2) => v.0 as i64,
                     _ => {
                         self.errors
-                            .push(ParsingError::IntLiteralOutOfRange { found: token });
+                            .push(ParsingError::IntLiteralOutOfRange { span: token.span });
                         0
                     }
                 };
@@ -1133,6 +1134,7 @@ impl<'t> Parser<'t> {
                     lit: value,
                     span,
                     id,
+                    radix,
                 });
                 Ok(Some(Expr::new(kind, span, id)))
             }
@@ -1368,7 +1370,7 @@ fn postfix_binding_power(token: &TokenKind) -> Option<(u8, ())> {
     Some(match token {
         TokenKind::LParen | TokenKind::LSquare | TokenKind::Period | TokenKind::Arrow => (200, ()),
         TokenKind::DoublePlus | TokenKind::DoubleMinus => (140, ()),
-        TokenKind::Keyword(KeywordKind::As) => (150, ()),
+        TokenKind::Keyword(KeywordKind::As) => (120, ()),
         _ => return None,
     })
 }
@@ -1457,6 +1459,7 @@ mod tests {
         pub fn num(n: i64) -> Expr {
             Expr::new(
                 ExprKind::Int(Int {
+                    radix: 10,
                     lit: n,
                     span: Span::empty(),
                     id: NodeId(0),
@@ -2044,30 +2047,33 @@ mod tests {
 
     #[test]
     fn test_number_parse() {
+        #[track_caller]
         fn compare(s: &str, expected: i64) {
             use utils::*;
             let mut ctx = ctx();
             let lexed = lex(s, &mut ctx);
             let mut parser = Parser::new(&lexed);
-            let atom = parser.parse_atom(&mut ctx).unwrap().unwrap();
+            let atom = parser.parse_expr(&mut ctx).unwrap();
             let ExprKind::Int(Int { lit: parsed, .. }) = atom.kind else {
                 unreachable!();
             };
             assert_eq!(parsed, expected)
         }
+        #[track_caller]
         fn assert_fail(s: &str) {
             use utils::*;
             let mut ctx = ctx();
             let tokens = lex(s, &mut ctx);
             let mut parser = Parser::new(&tokens);
-            let res = parser.parse_atom(&mut ctx).is_err();
+            let res = parser.parse_expr(&mut ctx).is_err();
             assert!(res || !parser.is_at_end() || !parser.errors.is_empty());
         }
         compare("9223372036854775807", 9223372036854775807);
         compare("0", 0);
-        compare("-9223372036854775808", -9223372036854775808);
+        // Should be checked in ast validation since I couldn't fit it neatly
+        // in the parser sadly...
+        compare("9223372036854775808", -9223372036854775808);
         assert_fail("-9223372036854775809");
-        assert_fail("9223372036854775808");
     }
 
     #[track_caller]
@@ -3662,7 +3668,7 @@ mod tests {
                 id: NodeId(0),
             },
             GlobalDeclaration {
-                kind: GlobalDeclarationKind::Variable(var_decl.clone()),
+                kind: GlobalDeclarationKind::Variable(var_decl),
                 span: Span::empty(),
                 id: NodeId(0),
             },
