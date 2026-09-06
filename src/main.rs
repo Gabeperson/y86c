@@ -39,7 +39,7 @@ fn main() {
         dbg!(type_check_res.errors);
         has_err = true;
     }
-    if (has_err) {
+    if has_err {
         std::process::exit(1);
     }
     let type_table = type_check_res.type_table;

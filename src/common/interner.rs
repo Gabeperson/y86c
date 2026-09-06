@@ -58,6 +58,9 @@ impl<T> Id<T> {
         // So ids are contiguous from 0
         self.index.get() - 1
     }
+    pub fn is_invalid(self) -> bool {
+        self.index.get() == u32::MAX
+    }
 }
 
 #[derive(Clone, Debug)]
@@ -88,11 +91,8 @@ impl<T: Clone + Eq + std::hash::Hash> Interner<T> {
         id
     }
     #[track_caller]
-    pub fn get_id_for(&self, item: T) -> Id<T> {
-        if let Some(id) = self.map.get(&item) {
-            return *id;
-        }
-        unreachable!()
+    pub fn get_id_for(&self, item: T) -> Option<Id<T>> {
+        self.map.get(&item).copied()
     }
 }
 
@@ -164,8 +164,9 @@ macro_rules! define_id {
             pub fn intern_deduplicated(&mut self, item: $typ) -> $id {
                 $id(self.0.intern_deduplicated(item))
             }
-            pub fn get_id_for(&self, item: $typ) -> $id {
-                $id(self.0.get_id_for(item))
+            #[track_caller]
+            pub fn get_id_for(&self, item: $typ) -> Option<$id> {
+                self.0.get_id_for(item).map($id)
             }
         }
     };
@@ -193,6 +194,9 @@ macro_rules! define_id {
         impl $id {
             pub fn get(self) -> u32 {
                 self.0.get()
+            }
+            pub fn is_invalid(self) -> bool {
+                self.0.is_invalid()
             }
         }
         #[derive(Debug, Clone)]

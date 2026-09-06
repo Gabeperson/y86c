@@ -73,10 +73,6 @@ fn main() {
     assert(c3 == 0xFFFFFFFFFFFFFFFF);
     assert(c4 == 0xFFFFFFFFFFFFFFFF);
 }
-struct Something {
-    a: [int; 15],
-    b: [*Something; 2],
-}
 let a: *void = nullptr;
 let b: *int = nullptr;
 let c: **int = 1 as *void;

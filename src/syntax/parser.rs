@@ -154,8 +154,7 @@ impl<'t> Parser<'t> {
                 TokenKind::RCurly => {
                     let next = self.next()?;
                     if let TokenKind::Keyword(KeywordKind::Struct)
-                    | TokenKind::Keyword(KeywordKind::Fn)
-                    | TokenKind::Keyword(KeywordKind::Let) = next.kind
+                    | TokenKind::Keyword(KeywordKind::Fn) = next.kind
                     {
                         self.advance();
                         return Ok(());
@@ -395,7 +394,16 @@ impl<'t> Parser<'t> {
                         }
                     }
                 }
-                TokenKind::RCurly => return Ok(()),
+                TokenKind::RCurly => {
+                    self.advance();
+                    while let Ok(tok) = self.current()
+                        && let TokenKind::Semicolon = tok.kind
+                    {
+                        self.advance();
+                    }
+                    return Ok(());
+                }
+                TokenKind::Keyword(KeywordKind::Let) => return Ok(()),
                 _ => self.advance(),
             }
         }

@@ -150,7 +150,7 @@ impl Place {
                 span,
                 base_typ,
             } => lowerer.new_load(block, span, val, base_typ),
-            Place::None => unreachable!(),
+            Place::None => ValueId::default(),
         }
     }
     #[track_caller]
@@ -272,7 +272,7 @@ impl<'a> FunctionLowerer<'a> {
                     inst.extra = InstExtraData::ParamIndex {
                         index: (i + sret_add) as u32,
                     };
-                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+                    val.dbg_name = Some(name.sym);
                     self.function.sig.params.push(FunctionParam {
                         kind: FunctionParamKind::Arg,
                         typ: typ_id,
@@ -297,7 +297,7 @@ impl<'a> FunctionLowerer<'a> {
                     inst.extra = InstExtraData::ParamIndex {
                         index: (i + sret_add) as u32,
                     };
-                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+                    val.dbg_name = Some(name.sym);
                     self.function.sig.params.push(FunctionParam {
                         kind: FunctionParamKind::Arg,
                         typ: typ_id,
@@ -309,7 +309,7 @@ impl<'a> FunctionLowerer<'a> {
                     let (ptr, _, val, inst) =
                         self.new_inst1(Opcode::GetStackAddr, entry_block, name.span, &[], ptr_typ);
                     inst.extra = InstExtraData::StackSlot(slot_id);
-                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+                    val.dbg_name = Some(name.sym);
 
                     self.new_store(entry_block, name.span, val_id, ptr);
 
@@ -328,7 +328,7 @@ impl<'a> FunctionLowerer<'a> {
                     inst.extra = InstExtraData::ParamIndex {
                         index: (i + sret_add) as u32,
                     };
-                    val.dbg_name = Some(val.dbg_name.unwrap_or(name.sym));
+                    val.dbg_name = Some(name.sym);
                     self.function.sig.params.push(FunctionParam {
                         kind: FunctionParamKind::Arg,
                         typ: ptr_typ,
@@ -392,7 +392,8 @@ impl<'a> FunctionLowerer<'a> {
                 self.lower_var_decl(*var_decl, block_id)
             }
             ast::StmtKind::Expr(expr_id) => {
-                let (_place, next) = self._lower_expr(*expr_id, block_id, None, false);
+                let (place, next) = self._lower_expr(*expr_id, block_id, None, false);
+                place.read(self, next);
                 ControlFlow::Continue(next)
             }
         }
@@ -610,6 +611,40 @@ impl<'a> FunctionLowerer<'a> {
         let is_aggregate = asttyp.is_array() || asttyp.is_struct();
 
         match (is_aggregate, var_decl.init_value) {
+            (false, init) if var.address_taken => {
+                let slot_id = self.new_stackslot(
+                    size,
+                    align,
+                    Some(var_decl.name.sym),
+                    StackSlotKind::AddressTakenLocal,
+                );
+                let ptr_typ = self.typectx.ptr_typ();
+                let (var_ptr, _, val, inst) =
+                    self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
+                inst.extra = InstExtraData::StackSlot(slot_id);
+                val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
+
+                let next = if let Some(init) = init {
+                    let (expr, next) = self.lower_expr(init, block_id, None);
+                    let val_id = expr.read(self, next);
+                    Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
+                    next
+                } else {
+                    block_id
+                };
+
+                self.write_variable(VarId::Id(varid), next, var_ptr);
+                ControlFlow::Continue(next)
+            }
+            (false, Some(init)) => {
+                let (expr, next) = self.lower_expr(init, block_id, None);
+                let val_id = expr.read(self, next);
+                let val = self.function.values.get_mut(val_id);
+                val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
+
+                self.write_variable(VarId::Id(varid), next, val_id);
+                ControlFlow::Continue(next)
+            }
             (false, None) => {
                 // This is technically not needed, as accessing an uninitialized
                 // variable is UB, but we'll be nice and allow it and just load the zero-value.
@@ -620,7 +655,7 @@ impl<'a> FunctionLowerer<'a> {
                 let val = match typ {
                     Type::I64 => {
                         let (val_id, val) = self.load_const(0, block_id, var_decl.span);
-                        val.dbg_name = Some(var_decl.name.sym);
+                        val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
                         val_id
                     }
                     Type::Ptr | Type::FnPtr => {
@@ -633,43 +668,13 @@ impl<'a> FunctionLowerer<'a> {
                             typ_id,
                         );
                         inst.extra = InstExtraData::ElementType(typ_id);
-                        val.dbg_name = Some(var_decl.name.sym);
+                        val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
                         val_id
                     }
                     _ => unreachable!(),
                 };
                 self.write_variable(VarId::Id(varid), block_id, val);
                 ControlFlow::Continue(block_id)
-            }
-            (false, Some(init)) => {
-                if var.address_taken {
-                    let slot_id = self.new_stackslot(
-                        size,
-                        align,
-                        Some(var_decl.name.sym),
-                        StackSlotKind::AddressTakenLocal,
-                    );
-                    let ptr_typ = self.typectx.ptr_typ();
-                    let (var_ptr, _, val, inst) =
-                        self.new_inst1(Opcode::GetStackAddr, block_id, var_decl.span, &[], ptr_typ);
-                    inst.extra = InstExtraData::StackSlot(slot_id);
-                    val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
-
-                    let (expr, next) = self.lower_expr(init, block_id, None);
-                    let val_id = expr.read(self, next);
-
-                    Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
-                    self.write_variable(VarId::Id(varid), next, var_ptr);
-                    ControlFlow::Continue(next)
-                } else {
-                    let (expr, next) = self.lower_expr(init, block_id, None);
-                    let val_id = expr.read(self, next);
-                    let val = self.function.values.get_mut(val_id);
-                    val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
-
-                    self.write_variable(VarId::Id(varid), next, val_id);
-                    ControlFlow::Continue(next)
-                }
             }
             (true, init) => {
                 let stack_slot = self.new_stackslot(
@@ -715,9 +720,8 @@ impl<'a> FunctionLowerer<'a> {
         // sometimes we want to call this with no sptr with an expression that has a
         // "return type" of a struct. If we do this regularly, the lower_expr will think
         // this is an "intermediate aggregate access" and will generate an sptr.
-        // But sometimes we don't want this, like when we want the location of a struct we wish to write to.
+        // But sometimes we don't want this, like when we want the location of a struct we wish to write to or read from.
         // when the ExprStmt is lowered, it would generate a stackslot which is unneeded and unused
-        // and also when trying to assign to an ident that is undefined that is also a struct/array.
         // This arg is here to prevent that in these cases.
         gen_sptr: bool,
     ) -> (Place, BlockId) {
@@ -750,7 +754,7 @@ impl<'a> FunctionLowerer<'a> {
             ast::ExprKind::Cast(cast) => self.lower_cast(cast, block_id),
             ast::ExprKind::Ident(ident) => self.lower_ident(ident, block_id, sptr),
             ast::ExprKind::Int(int) => self.lower_int(int, block_id),
-            ast::ExprKind::BinaryOp(binary_op) => self.lower_binary_op(binary_op, block_id),
+            ast::ExprKind::BinaryOp(binary_op) => self.lower_binary_op(binary_op, block_id, sptr),
             ast::ExprKind::PrefixOp(prefix_op) => self.lower_prefix_op(prefix_op, block_id, sptr),
             ast::ExprKind::PostfixOp(postfix_op) => self.lower_postfix_op(postfix_op, block_id),
             ast::ExprKind::Ternary(ternary) => self.lower_ternary(ternary, block_id, sptr),
@@ -849,16 +853,25 @@ impl<'a> FunctionLowerer<'a> {
         let (val_id, _) = self.load_const(int.lit, block_id, int.span);
         (Place::ssa(val_id), block_id)
     }
-    fn lower_binary_op(&mut self, binop: ast::BinaryOp, block_id: BlockId) -> (Place, BlockId) {
+    fn lower_binary_op(
+        &mut self,
+        binop: ast::BinaryOp,
+        block_id: BlockId,
+        sptr: Option<ValueId>,
+    ) -> (Place, BlockId) {
         match binop.kind {
             ast::BinaryOpKind::Assign => {
                 if self.needs_sptr(binop.right) {
                     let (lhs_place, block) = self._lower_expr(binop.left, block_id, None, false);
+                    let typ = self.get_expr_type(binop.left);
                     let lhs_ptr = lhs_place.get_ptr();
                     // Passing the lhs_ptr as the sptr will make the children of this node copy into it
                     // effectively performing the assignment. So we don't need to do anything else but just exit.
                     let (_place, block) = self.lower_expr(binop.right, block, Some(lhs_ptr));
-                    return (Place::ssa(lhs_ptr), block);
+                    if let Some(sptr) = sptr {
+                        self.new_memcpy(block, binop.span, sptr, lhs_ptr, typ);
+                    }
+                    return (Place::ptr(lhs_ptr, binop.span, typ), block);
                 } else {
                     let (lhs_place, block) = self.lower_expr(binop.left, block_id, None);
                     let (rhs_place, block) = self.lower_expr(binop.right, block, None);
@@ -1083,6 +1096,7 @@ impl<'a> FunctionLowerer<'a> {
                         typ: pointee_type,
                         forward: binop.kind == ast::BinaryOpKind::AddAssign,
                     };
+                    lhs_place.write(val_id, self, block);
                     (Place::ssa(val_id), block)
                 }
                 _ => unreachable!(),
@@ -1339,7 +1353,8 @@ impl<'a> FunctionLowerer<'a> {
             let (_, inst) = self.new_inst0(Opcode::IndirectCall, block, funccall.span, &args);
             inst.extra = InstExtraData::ICallKind(callkind);
             if let Some(sptr) = sptr {
-                (Place::ssa(sptr), block)
+                let typ = self.get_expr_type(expr_id);
+                (Place::ptr(sptr, funccall.span, typ), block)
             } else {
                 (Place::None, block)
             }
@@ -1381,7 +1396,7 @@ impl<'a> FunctionLowerer<'a> {
             // It also means it's an aggregate, since it would've just been loaded from otherwise.
             // So we just instantly copy the aggregate into the sptr and return it.
             self.new_memcpy(block, arrayindex.span, ptr, val_id, pointee_typ);
-            (Place::ssa(ptr), block)
+            (Place::ptr(ptr, arrayindex.span, pointee_typ), block)
         } else {
             (Place::ptr(val_id, arrayindex.span, pointee_typ), block)
         }
@@ -1492,7 +1507,7 @@ impl<'a> FunctionLowerer<'a> {
                 block = next;
             }
         }
-        (Place::ssa(sptr), block)
+        (Place::ptr(sptr, array_init.span, elem_type), block)
     }
     fn lower_member_access(
         &mut self,

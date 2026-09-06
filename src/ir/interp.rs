@@ -32,12 +32,18 @@ impl<'a> IrInterpreter<'a> {
         self.instruction_count = 0;
         self.global_locs.clear();
         self.prep();
-        let main = self.ctx.symbol_interner.get_id_for(SmolStr::new("main"));
+        let main = self
+            .ctx
+            .symbol_interner
+            .get_id_for(SmolStr::new("main"))
+            .expect("main should exist for interp'd code");
         let res = self.run_func(main, &[]);
         assert!(res.is_none());
     }
     pub fn prep(&mut self) {
-        let mut pos = 0usize;
+        // Find errors with nullptr + X pointer stores/loads
+        self.buf.resize(4096, 0);
+        let mut pos = 4096usize;
         for (name, global) in self.program.globals.map.iter() {
             let layout = global.val.layout();
             pos = pos.next_multiple_of(layout.align);
@@ -56,7 +62,10 @@ impl<'a> IrInterpreter<'a> {
         }
     }
     pub fn run_func(&mut self, func: Symbol, args: &[i64]) -> Option<i64> {
-        let func = self.program.functions.get(&func).unwrap();
+        let Some(func) = self.program.functions.get(&func) else {
+            let func = self.ctx.get_symbol(func);
+            panic!("function '{func}' not found");
+        };
         let typectx = &self.program.typectx;
         let mut stackslot_locs = Vec::with_capacity(func.stack_slots.len());
         let stackslots_size = func.stack_slots.fold(0usize, |pos, id, stackslot| {
@@ -84,6 +93,17 @@ impl<'a> IrInterpreter<'a> {
             let inst = func.insts.get(inst_id);
             {
                 // println!("{}", printer.fmt_inst(inst_id));
+            }
+            for val in &inst.operands {
+                assert!(!val.is_invalid());
+            }
+            for val in &inst.results {
+                assert!(!val.is_invalid());
+            }
+            if let InstExtraData::Phi { operands } = &inst.extra {
+                for operand in operands {
+                    assert!(!operand.value.is_invalid());
+                }
             }
             self.instruction_count += 1;
             match inst.op {
@@ -159,6 +179,7 @@ impl<'a> IrInterpreter<'a> {
                             .map(|op| op.value)
                             .unwrap();
                         let val = values[&val_id];
+                        dbg!(val);
                         values.insert(inst.results[0], val);
                     }
                 }
@@ -206,6 +227,7 @@ impl<'a> IrInterpreter<'a> {
                     assert_eq!(inst.results.len(), 1);
                     assert_eq!(inst.operands.len(), 2);
                     let ptr = values[&inst.operands[0]] as usize;
+                    assert!(ptr >= 4096, "invalid pointer dereference");
                     assert!(ptr.is_multiple_of(8), "Load from unaligned pointer");
                     let arr: [u8; 8] = self.buf[ptr..][..8].try_into().unwrap();
                     let val = i64::from_le_bytes(arr);
@@ -217,6 +239,7 @@ impl<'a> IrInterpreter<'a> {
                     assert_eq!(inst.operands.len(), 2);
                     let val = values[&inst.operands[0]];
                     let ptr = values[&inst.operands[1]] as usize;
+                    assert!(ptr >= 4096, "invalid pointer dereference");
                     assert!(ptr.is_multiple_of(8), "Store into unaligned pointer");
                     let arr = val.to_le_bytes();
                     self.buf[ptr..][..8].copy_from_slice(&arr);

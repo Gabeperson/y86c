@@ -257,7 +257,7 @@ impl LoweringPrepass<'_> {
                 }
             }
             ExprKind::ArrayIndex(array_index) => {
-                self.visit_expr(array_index.array, true);
+                self.visit_expr(array_index.array, false);
                 self.visit_expr(array_index.index, false);
             }
             ExprKind::StructInit(struct_init) => {
