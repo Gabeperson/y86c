@@ -1,229 +1,126 @@
-// deref
-// function calls
-// ptr array indexing
-
 fn main() {
-    provs();
-    op_assigns();
-    assign();
-    incr_decr();
-    ptr_arr();
-}
+    let i: int = 0;
+    assert(ptr_write(&i) == &i);
+    assert(i == 50);
+    let s: Struct;
+    ptr_struct(&s);
+    assert(s.x == 5);
+    let gsp: *Struct = ptr_ret();
+    assert(gsp == &gs);
+    assert(gsp->x == 15000);
 
-struct Something {
-    a: int,
-    b: int,
-    c: *int,
-}
+    s = Struct {x: 100};
+    struct_assign(&s);
+    assert(s.x == 15000);
 
-struct Mini {
-    a: int,
-}
-
-struct IncludesMini {
-    mini: Mini,
-}
-
-
-fn incr_decr() {
-    let a: int = 5;
-    let b: int = 5;
-    let c: *int = &b;
-
-    assert(a++ == 5);
-    assert(a == 6);
-    assert(a-- == 6);
-    assert(a == 5);
-    assert(++a == 6);
-    assert(a == 6);
-    assert(--a == 5);
-    assert(a == 5);
-    assert(b++ == 5);
-    assert(b == 6);
-    assert(b-- == 6);
-    assert(b == 5);
-    assert(++b == 6);
-    assert(b == 6);
-    assert(--b == 5);
-    assert(b == 5);
-
-    assert(c++ == &b);    
-    assert(c == &b+1);
-    assert(c-- == &b+1);
-    assert(c == &b);
-    assert(++c == &b+1);
-    assert(c == &b+1);
-    assert(--c == &b);
-    assert(c == &b);
-}
-
-fn assign() {
-    let a: int = 5;
-    let b: int = 5;
-    let c: *int;
-    assert(a == 5);
-    assert(b == 5);
-    a = 10;
-    b = 10;
-    assert(a == 10);
-    assert(b == 10);
-    c = &b;
-    assert(&b == c);
-    let s: Something = Something {
-        a: 1,
-        b: 2,
-        c: &b,
-    };
-    let s0: Something = Something {
-        a: 0,
-        b: 0,
-        c: nullptr,
-    };
-    let s1: Something = s;
-    assert(s1.a == 1);
-    assert(s1.b == 2);
-    assert(s1.c == &b);
-    s1 = s0;
-    *&s1 = s;
-    assert(s1.a == 1);
-    assert(s1.b == 2);
-    assert(s1.c == &b);
-    assert((s1 = s).a == 1);
-    assert((s1 = s).b == 2);
-    assert((s1 = s).c == &b);
-
-    let sp: *Something = &s;
-
-    assert(sp->a == 1);
-    assert(sp->b == 2);
-    assert(sp->c == &b);
-    sp = nullptr;
-    assert((sp = &s)->a == 1);
-    assert((sp = &s)->b == 2);
-    assert((sp = &s)->c == &b);
-
-    b = 10;
-    assert((*(c = &b) = 5) == 5);
-    assert(b == 5);
-
-    let mini: Mini = Mini { a: 15000 };
-    let mini_1: Mini;
-    let includes_mini: IncludesMini = IncludesMini {
-        mini: (mini_1 = mini),
-    };
-
-    assert(includes_mini.mini.a == 15000);
-
-    let d: [int; 5];
-    let e: [int; 5] = d = [1, 2, 3, 4, 5];
-    for (let i: int = 0; i < 5; i++) {
-        assert(d[i] == i+1);
-        assert(e[i] == i+1);
-    }
-    assert((d = [5, 6, 7, 8, 9])[0] == 5);
-}
-
-fn op_assigns() {
-    let a: int = 5;
-    let b: int = 5;
-    let c: *int = &b;
-    let c0: *int = &b;
-    assert((a += 10) == 15);
-    assert(a == 15);
-    assert((b += 10) == 15);
-    assert(b == 15);
-    assert((c += 1) == c0 + 1);
-    assert(c == c0 + 1);
-
-    assert((a -= 10) == 5);
-    assert(a == 5);
-    assert((b -= 10) == 5);
-    assert(b == 5);
-    assert((c -= 1) == c0);
-    assert(c == c0);
-
-    assert((a *= 10) == 50);
-    assert(a == 50);
-    assert((b *= 10) == 50);
-    assert(b == 50);
-
-    assert((a /= 5) == 10);
-    assert(a == 10);
-    assert((b /= 5) == 10);
-    assert(b == 10);
-
-    a = 0b1010;
-    assert((a &= 0b1001) == 0b1000);
-    assert(a == 0b1000);
-    b = 0b1010;
-    assert((b &= 0b1001) == 0b1000);
-    assert(b == 0b1000);
-
-    a = 0b1010;
-    assert((a |= 0b1001) == 0b1011);
-    assert(a == 0b1011);
-    b = 0b1010;
-    assert((b |= 0b1001) == 0b1011);
-    assert(b == 0b1011);
-
-    a = 0b1010;
-    assert((a ^= 0b1001) == 0b0011);
-    assert(a == 0b0011);
-    b = 0b1010;
-    assert((b ^= 0b1001) == 0b0011);
-    assert(b == 0b0011);
-
-    a = 15;
-    assert((a %= 4) == 3);
-    assert(a == 3);
-    b = 15;
-    assert((b %= 4) == 3);
-    assert(b == 3);
-
-    a = 0b0110;
-    assert((a <<= 1) == 0b1100);
-    assert(a == 0b1100);
-    b = 0b0110;
-    assert((b <<= 1) == 0b1100);
-    assert(b == 0b1100);
-    a = 0b0110;
-    assert((a >>= 1) == 0b0011);
-    assert(a == 0b0011);
-    b = 0b0110;
-    assert((b >>= 1) == 0b0011);
-    assert(b == 0b0011);
-}
-
-fn provs() {
-    let a: [int; 1024];
-    let b: *int = &a[0] + 10;
-    let c: *int = new_prov(b);
-    *c = 10;
-    assert(*c == 10);
-    let d: *void = copy_prov(c, c as int);
-    let e: int = expose_prov(d);
-    let f: *void = unexpose_prov(e);
-    *(f as *int) = 5;
-}
-
-fn ptr_arr() {
+    assert(field_ptr(&gs) == &gs.x);
     let arr: [int; 5];
-    let iptr: *int = &arr[0];
-    for (let i: int = 0; i < 5; i++) {
-        *iptr = i;
-        iptr++;
-    }
+    arr_ptr(&arr);
     for (let i: int = 0; i < 5; i++) {
         assert(arr[i] == i);
     }
 
     arr = [0, 0, 0, 0, 0];
-    iptr = &arr[0];
+    let ptr: *int = arr_ptr_ret(&arr);
     for (let i: int = 0; i < 5; i++) {
-        iptr[i] = i;
+        assert(ptr[i] == i);
     }
-    // for (let i: int = 0; i < 5; i++) {
-    //     assert(arr[i] == i);
-    // }
+
+    let a: int = 0;
+    let b: *int = &a;
+    ptr_ptr(&b);
+    assert(a == 100000);
+
+    l1(&a);
+    assert(a == 100);
+
+    l1(&s.x);
+    assert(s.x == 100);
+
+    assert(elem(&arr, 3) == &arr[0] + 3);
+    assert(ptr_identity(nullptr) == nullptr);
+
+    *ptr_identity(&a) = 5;
+    assert(a == 5);
+    assert(*ptr_identity(&a) == 5);
+
+    assert(*vti(itv(&a)) == 5);
+
+    set(elem(&arr, 2), 10000000);
+    assert(arr[2] == 10000000);
+
+    set(field_ptr(&s), 500000);
+    assert(s.x == 500000);
 }
 
+fn vti(p: *void) -> *int {
+    return p;
+}
+
+fn itv(p: *int) -> *void {
+    return p;
+}
+
+fn ptr_identity(i: *int) -> *int {
+    return i;
+}
+
+fn elem(a: *[int; 5], i: int) -> *int {
+    return &(*a)[i];
+}
+
+fn set(p: *int, v: int) {
+    *p = v;
+}
+
+fn l1(p: *int) {
+    l2(p);
+}
+
+fn l2(p: *int) {
+    *p = 100;
+}
+
+fn ptr_ptr(p: **int) {
+    **p = 100000;
+}
+
+fn arr_ptr_ret(a: *[int; 5]) -> *int {
+    arr_ptr(a);
+    return a as *void;
+}
+
+fn arr_ptr(a: *[int; 5]) {
+    for (let i: int = 0; i < 5; i++) {
+        (*a)[i] = i;
+    }
+}
+
+fn field_ptr(s: *Struct) -> *int {
+    return &s->x;
+}
+
+fn struct_assign(s: *Struct) {
+    *s = gs;
+}
+
+fn ptr_ret() -> *Struct {
+    return &gs;
+}
+
+fn ptr_write(ptr: *int) -> *int {
+    *ptr = 50;
+    return ptr;
+}
+
+fn ptr_struct(ptr: *Struct) {
+    ptr->x = 5;
+}
+
+struct Struct {
+    x: int,
+}
+
+let gs: Struct = Struct {
+    x: 15000,
+};

@@ -1,0 +1,62 @@
+fn main() {
+    assert(p(15, 20) == 1520);
+    assert(p(20, 15) == 2015);
+    assert(ret200(1000, 15000) == 200);
+    assert(identity(500) == 500);
+    assert(ret2() == 2);
+    define_x();
+    assert(earlyret(0) == 10);
+    assert(earlyret(10) == 200);
+    let fibs: [int; 15] = [1, 1, 2, 3, 5, 8, 13, 21, 34, 55, 89, 144, 233, 377, 610];
+    for (let i: int = 0; i < 15; i++) {
+        assert(fib(i+1) == fibs[i]);
+    }
+    assert(incr(incr(incr(incr(incr(0))))) == 5);
+}
+
+fn incr(i: int) -> int {
+    return ++i;
+}
+
+fn p(a: int, b:int) -> int {
+    return a*100+b;
+}
+
+fn ret200(a: int, b: int) -> int {
+    a = 100;
+    b = 100;
+    return a+b;
+}
+
+fn identity(a: int) -> int {
+    return a;
+}
+
+fn ret2() -> int {
+    return 2;
+    return 1;
+}
+
+fn define_x() {
+    let x: int = 10;
+    use_x(x);
+    assert(x == 10);
+}
+
+fn use_x(x: int) -> int {
+    let y: int = x;
+    y = 20;
+    return y;
+}
+
+fn earlyret(x: int) -> int {
+    if (x == 0) {
+        return 10;
+    }
+    return 200;
+}
+
+fn fib(n: int) -> int {
+    if (n <= 1) return n;
+    return fib(n-1) + fib(n-2);
+}

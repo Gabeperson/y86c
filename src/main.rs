@@ -1,3 +1,5 @@
+use std::time::Instant;
+
 use y86c::analysis::ast_validator::*;
 use y86c::analysis::symbol_table::SymbolTableBuilder;
 use y86c::analysis::type_checker::TypeChecker;
@@ -9,9 +11,24 @@ use y86c::syntax::context::Context;
 use y86c::syntax::lexer::Lexer;
 use y86c::syntax::parser::Parser;
 fn main() {
+    let start = Instant::now();
     let file = std::fs::read_to_string("file.y86").unwrap();
+    run(&file, "file.y86");
+
+    for file in std::fs::read_dir("testfiles/interp/").unwrap() {
+        let file = file.unwrap();
+        let s = std::fs::read_to_string(file.path()).unwrap();
+        run(&s, &file.file_name().into_string().unwrap());
+    }
+    let end = start.elapsed();
+
+    println!("Ran all interp tests in: {end:?}")
+}
+
+fn run(s: &str, name: &str) {
+    println!("Running {name}");
     let mut ctx = Context::new();
-    let lexed = Lexer::lex(&file, &mut ctx);
+    let lexed = Lexer::lex(s, &mut ctx);
     let mut has_err = false;
     if lexed.has_errors() {
         dbg!(lexed.errors);
@@ -59,7 +76,6 @@ fn main() {
         println!();
     }
 
-    let mut interp = IrInterpreter::new(&ir_program, &file, &ctx);
+    let mut interp = IrInterpreter::new(&ir_program, s, &ctx);
     interp.run();
-    println!("Interpreter successfully ran");
 }

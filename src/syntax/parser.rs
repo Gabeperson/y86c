@@ -403,7 +403,13 @@ impl<'t> Parser<'t> {
                     }
                     return Ok(());
                 }
-                TokenKind::Keyword(KeywordKind::Let) => return Ok(()),
+                TokenKind::Keyword(
+                    KeywordKind::Let
+                    | KeywordKind::Return
+                    | KeywordKind::For
+                    | KeywordKind::While
+                    | KeywordKind::If,
+                ) => return Ok(()),
                 _ => self.advance(),
             }
         }

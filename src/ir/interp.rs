@@ -14,6 +14,7 @@ pub struct IrInterpreter<'a> {
     pub global_locs: AHashMap<Symbol, usize>,
     pub instruction_count: usize,
     pub ctx: &'a Context,
+    pub print: bool,
 }
 
 impl<'a> IrInterpreter<'a> {
@@ -25,6 +26,7 @@ impl<'a> IrInterpreter<'a> {
             global_locs: AHashMap::new(),
             instruction_count: 0,
             ctx,
+            print: false,
         }
     }
     pub fn run(&mut self) {
@@ -91,8 +93,8 @@ impl<'a> IrInterpreter<'a> {
                 break 'mainloop None;
             };
             let inst = func.insts.get(inst_id);
-            {
-                // println!("{}", printer.fmt_inst(inst_id));
+            if self.print {
+                println!("{}", printer.fmt_inst(inst_id));
             }
             for val in &inst.operands {
                 assert!(!val.is_invalid());
@@ -179,7 +181,6 @@ impl<'a> IrInterpreter<'a> {
                             .map(|op| op.value)
                             .unwrap();
                         let val = values[&val_id];
-                        dbg!(val);
                         values.insert(inst.results[0], val);
                     }
                 }

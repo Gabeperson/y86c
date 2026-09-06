@@ -171,6 +171,7 @@ impl Place {
     #[track_caller]
     fn get_ptr(self) -> ValueId {
         match self {
+            Place::SsaVar { val } | Place::SsaAssignableVar { val, .. } => val,
             Place::Ptr { val, .. } => val,
             _ => unreachable!(),
         }
@@ -829,6 +830,12 @@ impl<'a> FunctionLowerer<'a> {
             let (val_id, _, _, inst) =
                 self.new_inst1(Opcode::LoadGlobalLoc, block_id, ident.span, &[], ptr_typ);
             inst.extra = InstExtraData::Global(ident.sym);
+            if let Some(sptr) = sptr {
+                let typ = self.ast_to_ir_type(var.typ);
+                self.new_memcpy(block_id, ident.span, sptr, val_id, typ);
+                return (Place::ptr(sptr, ident.span, typ), block_id);
+            }
+
             if var.is_function {
                 return (Place::ssa(val_id), block_id);
             } else {
@@ -1978,10 +1985,12 @@ impl<'a> FunctionLowerer<'a> {
         from: ValueId,
         elem_typ: TypeId,
     ) {
+        let mem_sym = self.ctx.intern_symbol("mem");
         let mem_typ = self.typectx.mem_typ();
         let mem_val = self.read_variable(VarId::Mem, block);
-        let (val_id, _, _, inst) =
+        let (val_id, _, val, inst) =
             self.new_inst1(Opcode::Memcpy, block, span, &[to, from, mem_val], mem_typ);
+        val.dbg_name = Some(mem_sym);
         inst.extra = InstExtraData::ElementType(elem_typ);
         self.write_variable(VarId::Mem, block, val_id);
     }
@@ -2055,11 +2064,9 @@ impl Function {
         let inst = self.insts.get(inst_id);
         let block_id = inst.block;
         let block = self.blocks.get_mut(block_id);
-        let idx = block
-            .insts
-            .iter()
-            .position(|&i| i == inst_id)
-            .expect("Should only be called for phi insts that exist");
+        let Some(idx) = block.insts.iter().position(|&i| i == inst_id) else {
+            return;
+        };
         block.insts.remove(idx);
     }
     fn replace_inst_value(&mut self, inst_id: InstId, from: ValueId, to: ValueId) {
