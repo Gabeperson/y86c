@@ -21,6 +21,10 @@ struct IncludesMini {
     mini: Mini,
 }
 
+struct MiniArrStruct {
+    minis: [Mini; 3],
+}
+
 fn deref() {
     let mini: Mini = Mini {
         a: 10,
@@ -56,8 +60,63 @@ fn deref() {
     mini2.a = 0;
     mini2 = *(1 ? &mini : &mini);
     assert(mini2.a == 150);
+    mini.a = 0;
+    mini2.a = 0;
 
-    let i: int = (1 ? mini : mini).a;
+    mini = (mini2 = Mini {a: 5});
+    assert(mini.a == 5);
+    assert(mini2.a == 5);
+
+    
+    mini2.a = 500;
+    mini.a = 1000;
+
+    let i: int;
+    i = (1 ? mini : mini2).a;
+    assert(i == 1000);
+    i = (0 ? mini : mini2).a;
+    assert(i == 500);
+
+    for (let j: int = 0; j < 5; j++) {
+        i = [1, 2, 3, 4, 5][j];
+        assert(i == j+1);
+    }
+
+    assert([1, 2, 3, 4, 5][[1, 2, 3, 4, 5][3]] == 5);
+    let mini_arr_s: MiniArrStruct = MiniArrStruct {
+        minis: [
+            Mini {
+                a: 1
+            },
+            Mini {
+                a: 2
+            },
+            Mini {
+                a: 3
+            }
+        ],
+    };
+    let arr2: [MiniArrStruct; 3] = [
+        mini_arr_s, mini_arr_s, mini_arr_s
+    ];
+    for (let i: int = 0; i < 3; i++) {
+        for (let j: int = 0; j < 3; j++) {
+            assert(arr2[i].minis[j].a == j+1);
+        }
+    }
+    let arr_arr: [[int; 2]; 2] = [[1, 2], [3, 4]];
+    assert(arr_arr[0][0] == 1);
+    assert(arr_arr[0][1] == 2);
+    assert(arr_arr[1][0] == 3);
+    assert(arr_arr[1][1] == 4);
+
+    assert((1 ? [1, 2, 3] : [4, 5, 6])[0] == 1);
+    assert((1 ? [1, 2, 3] : [4, 5, 6])[1] == 2);
+    assert((1 ? [1, 2, 3] : [4, 5, 6])[2] == 3);
+
+    assert((0 ? [1, 2, 3] : [4, 5, 6])[0] == 4);
+    assert((0 ? [1, 2, 3] : [4, 5, 6])[1] == 5);
+    assert((0 ? [1, 2, 3] : [4, 5, 6])[2] == 6);
 }
 
 fn ret_mini(p: *Mini) -> *Mini {

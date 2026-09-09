@@ -129,6 +129,7 @@ impl<T> Interner<T> {
         let index = (id.index.get() - 1) as usize;
         self.arr.get(index).expect("Internal Compiler Error")
     }
+    #[track_caller]
     pub fn get_mut(&mut self, id: Id<T>) -> &mut T {
         if id.index.get() == u32::MAX {
             panic!("Internal compiler error");

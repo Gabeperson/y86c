@@ -15,6 +15,13 @@ use crate::syntax::ast::{self, NodeId};
 
 use crate::syntax::context::{Context, ExprId, StmtId};
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SPtrOption {
+    ReturnPlace,
+    WriteInto(ValueId),
+    None,
+}
+
 #[derive(Debug)]
 pub struct Lowerer<'a> {
     prepass: &'a mut LoweringPrepassOutput,
@@ -126,11 +133,15 @@ enum Place {
         val: ValueId,
         prepass_varid: prepass::VarId,
     },
-    // address-taken var or struct, array, etc
-    Ptr {
-        val: ValueId,
+    // address-taken intlike var, global etc
+    IPtr {
+        ptr: ValueId,
         span: Span,
         base_typ: TypeId,
+    },
+    // Aggregates
+    APtr {
+        ptr: ValueId,
     },
     // void-returning exprs
     // currently only function calls that call -> void functions.
@@ -145,34 +156,39 @@ impl Place {
         match self {
             Place::SsaVar { val } => val,
             Place::SsaAssignableVar { val, .. } => val,
-            Place::Ptr {
-                val,
+            Place::IPtr {
+                ptr: val,
                 span,
                 base_typ,
             } => lowerer.new_load(block, span, val, base_typ),
-            Place::None => ValueId::default(),
+            Place::APtr { ptr } => ptr,
+            Place::None => unreachable!("Tried to read 'None' place"),
         }
     }
     #[track_caller]
     fn write(self, val: ValueId, lowerer: &mut FunctionLowerer, block: BlockId) {
         match self {
             Place::SsaVar { .. } => {
-                unreachable!()
+                unreachable!("Tried to write into non assignable ssa var")
             }
             Place::SsaAssignableVar { prepass_varid, .. } => {
                 lowerer.write_variable(VarId::Id(prepass_varid), block, val);
             }
-            Place::Ptr { val: ptr, span, .. } => {
+            Place::IPtr { ptr, span, .. } => {
                 lowerer.new_store(block, span, val, ptr);
             }
-            Place::None => unreachable!(),
+            Place::APtr { .. } => {
+                unreachable!("Tried to write directly from aggregate ptr")
+            }
+            Place::None => unreachable!("Tried to write into place that is 'none'"),
         }
     }
     #[track_caller]
     fn get_ptr(self) -> ValueId {
         match self {
             Place::SsaVar { val } | Place::SsaAssignableVar { val, .. } => val,
-            Place::Ptr { val, .. } => val,
+            Place::IPtr { ptr: val, .. } => val,
+            Place::APtr { ptr: val, .. } => val,
             _ => unreachable!(),
         }
     }
@@ -182,12 +198,15 @@ impl Place {
     fn ssa_ident(val: ValueId, prepass_varid: prepass::VarId) -> Self {
         Self::SsaAssignableVar { val, prepass_varid }
     }
-    fn ptr(val: ValueId, span: Span, base_typ: TypeId) -> Self {
-        Self::Ptr {
-            val,
+    fn iptr(ptr: ValueId, span: Span, base_typ: TypeId) -> Self {
+        Self::IPtr {
+            ptr,
             span,
             base_typ,
         }
+    }
+    fn aptr(ptr: ValueId) -> Self {
+        Self::APtr { ptr }
     }
 }
 
@@ -393,14 +412,13 @@ impl<'a> FunctionLowerer<'a> {
                 self.lower_var_decl(*var_decl, block_id)
             }
             ast::StmtKind::Expr(expr_id) => {
-                let (place, next) = self._lower_expr(*expr_id, block_id, None, false);
-                place.read(self, next);
+                let (_place, next) = self.lower_expr(*expr_id, block_id, SPtrOption::None);
                 ControlFlow::Continue(next)
             }
         }
     }
     fn lower_assert(&mut self, assert: ast::Assert, block_id: BlockId) -> ControlFlow<(), BlockId> {
-        let (res, block) = self.lower_expr(assert.condition, block_id, None);
+        let (res, block) = self.lower_expr(assert.condition, block_id, SPtrOption::None);
         let res = res.read(self, block);
         self.new_inst0(Opcode::Assert, block, assert.span, &[res]);
         ControlFlow::Continue(block)
@@ -424,7 +442,7 @@ impl<'a> FunctionLowerer<'a> {
         block_id: BlockId,
         loop_blocks: Option<LoopBlocks>,
     ) -> ControlFlow<(), BlockId> {
-        let (cond, cond_block) = self.lower_expr(ifstmt.condition, block_id, None);
+        let (cond, cond_block) = self.lower_expr(ifstmt.condition, block_id, SPtrOption::None);
         let cond = cond.read(self, cond_block);
 
         let if_true = self.ctx.intern_symbol("if_true");
@@ -486,7 +504,7 @@ impl<'a> FunctionLowerer<'a> {
         self.new_jmp(block_id, while_loop.span, start_block);
 
         // start block checks cond, then branches to either loop body or the loop end
-        let (val, val_block) = self.lower_expr(while_loop.condition, start_block, None);
+        let (val, val_block) = self.lower_expr(while_loop.condition, start_block, SPtrOption::None);
         let val = val.read(self, val_block);
         self.new_branch(val_block, while_loop.span, val, body_block, end_block);
         self.seal_block(body_block);
@@ -530,7 +548,7 @@ impl<'a> FunctionLowerer<'a> {
 
         // start block checks cond then branches to either loop body or end
         if let Some(cond) = for_loop.condition {
-            let (cond, next) = self.lower_expr(cond, start_block, None);
+            let (cond, next) = self.lower_expr(cond, start_block, SPtrOption::None);
             let cond = cond.read(self, next);
             self.new_branch(next, for_loop.span, cond, body_block, end_block);
         } else {
@@ -557,7 +575,7 @@ impl<'a> FunctionLowerer<'a> {
             && uses_post
         {
             self.seal_block(post_block);
-            let (_val, post_end_block) = self.lower_expr(post, post_block, None);
+            let (_val, post_end_block) = self.lower_expr(post, post_block, SPtrOption::None);
             self.new_jmp(post_end_block, for_loop.span, start_block);
         }
         self.seal_block(start_block);
@@ -575,13 +593,13 @@ impl<'a> FunctionLowerer<'a> {
         if ret_type.is_struct() || ret_type.is_array() {
             let expr = return_stmt.value.expect("Checked in type checker");
             let sret = self.sret;
-            let (_val, next) = self.lower_expr(expr, block_id, Some(sret));
+            let (_val, next) = self.lower_expr(expr, block_id, SPtrOption::WriteInto(sret));
             self.new_inst0(Opcode::Return, next, return_stmt.span, &[]);
             return;
         }
 
         let (block, val) = if let Some(expr) = return_stmt.value {
-            let (val, block) = self.lower_expr(expr, block_id, None);
+            let (val, block) = self.lower_expr(expr, block_id, SPtrOption::None);
             let val = val.read(self, block);
             (block, Some(val))
         } else {
@@ -626,9 +644,9 @@ impl<'a> FunctionLowerer<'a> {
                 val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
 
                 let next = if let Some(init) = init {
-                    let (expr, next) = self.lower_expr(init, block_id, None);
+                    let (expr, next) = self.lower_expr(init, block_id, SPtrOption::None);
                     let val_id = expr.read(self, next);
-                    Place::ptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
+                    Place::iptr(var_ptr, var_decl.span, typ_id).write(val_id, self, next);
                     next
                 } else {
                     block_id
@@ -638,7 +656,7 @@ impl<'a> FunctionLowerer<'a> {
                 ControlFlow::Continue(next)
             }
             (false, Some(init)) => {
-                let (expr, next) = self.lower_expr(init, block_id, None);
+                let (expr, next) = self.lower_expr(init, block_id, SPtrOption::None);
                 let val_id = expr.read(self, next);
                 let val = self.function.values.get_mut(val_id);
                 val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
@@ -691,7 +709,8 @@ impl<'a> FunctionLowerer<'a> {
                 val.dbg_name = Some(val.dbg_name.unwrap_or(var_decl.name.sym));
 
                 let next = if let Some(init) = init {
-                    let (_place, next) = self.lower_expr(init, block_id, Some(var_ptr));
+                    let (_place, next) =
+                        self.lower_expr(init, block_id, SPtrOption::WriteInto(var_ptr));
                     next
                 } else {
                     block_id
@@ -708,47 +727,8 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         expr_id: ExprId,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
-        self._lower_expr(expr_id, block_id, sptr, true)
-    }
-
-    fn _lower_expr(
-        &mut self,
-        expr_id: ExprId,
-        block_id: BlockId,
-        sptr: Option<ValueId>,
-        // sometimes we want to call this with no sptr with an expression that has a
-        // "return type" of a struct. If we do this regularly, the lower_expr will think
-        // this is an "intermediate aggregate access" and will generate an sptr.
-        // But sometimes we don't want this, like when we want the location of a struct we wish to write to or read from.
-        // when the ExprStmt is lowered, it would generate a stackslot which is unneeded and unused
-        // This arg is here to prevent that in these cases.
-        gen_sptr: bool,
-    ) -> (Place, BlockId) {
-        let exprspan = {
-            let expr = self.ctx.get_expr(expr_id);
-            expr.span
-        };
-        let sptr = {
-            let typ_id = self.get_expr_type(expr_id);
-            if self.needs_sptr(expr_id) && gen_sptr {
-                sptr.or_else(|| {
-                    let size = self.typectx.type_size(typ_id);
-                    let align = self.typectx.type_align(typ_id);
-                    let slot_id =
-                        self.new_stackslot(size, align, None, StackSlotKind::IntermediateAggregate);
-                    let ptr_typ = self.typectx.ptr_typ();
-                    let (val, _, _, inst) =
-                        self.new_inst1(Opcode::GetStackAddr, block_id, exprspan, &[], ptr_typ);
-                    inst.extra = InstExtraData::StackSlot(slot_id);
-                    Some(val)
-                })
-            } else {
-                assert!(sptr.is_none());
-                None
-            }
-        };
         let expr = self.ctx.get_expr(expr_id);
         match expr.kind.clone() {
             ast::ExprKind::Nullptr(nullptr) => self.lower_nullptr(nullptr, block_id),
@@ -756,7 +736,9 @@ impl<'a> FunctionLowerer<'a> {
             ast::ExprKind::Ident(ident) => self.lower_ident(ident, block_id, sptr),
             ast::ExprKind::Int(int) => self.lower_int(int, block_id),
             ast::ExprKind::BinaryOp(binary_op) => self.lower_binary_op(binary_op, block_id, sptr),
-            ast::ExprKind::PrefixOp(prefix_op) => self.lower_prefix_op(prefix_op, block_id, sptr),
+            ast::ExprKind::PrefixOp(prefix_op) => {
+                self.lower_prefix_op(prefix_op, block_id, sptr, expr_id)
+            }
             ast::ExprKind::PostfixOp(postfix_op) => self.lower_postfix_op(postfix_op, block_id),
             ast::ExprKind::Ternary(ternary) => self.lower_ternary(ternary, block_id, sptr),
             ast::ExprKind::FunctionCall(function_call) => {
@@ -768,16 +750,12 @@ impl<'a> FunctionLowerer<'a> {
             ast::ExprKind::SizeOfType(size_of_type) => {
                 self.lower_size_of_type(size_of_type, block_id)
             }
-            ast::ExprKind::StructInit(struct_init) => self.lower_struct_init(
-                struct_init,
-                block_id,
-                sptr.expect("Should have been assigned above"),
-            ),
-            ast::ExprKind::ArrayInit(array_init) => self.lower_array_init(
-                array_init,
-                block_id,
-                sptr.expect("Should have been assigned above"),
-            ),
+            ast::ExprKind::StructInit(struct_init) => {
+                self.lower_struct_init(struct_init, block_id, sptr)
+            }
+            ast::ExprKind::ArrayInit(array_init) => {
+                self.lower_array_init(array_init, block_id, sptr, expr_id)
+            }
             ast::ExprKind::MemberAccess(member_access) => {
                 self.lower_member_access(member_access, block_id, sptr)
             }
@@ -805,7 +783,7 @@ impl<'a> FunctionLowerer<'a> {
         (Place::ssa(val_id), block_id)
     }
     fn lower_cast(&mut self, cast: ast::Cast, block_id: BlockId) -> (Place, BlockId) {
-        let (val, block) = self.lower_expr(cast.expr, block_id, None);
+        let (val, block) = self.lower_expr(cast.expr, block_id, SPtrOption::None);
         let res = val.read(self, block);
         let orig_typ_id = self.function.values.get_mut(res).typ;
         let casted_to_id = self.ast_to_ir_type(cast.to_type.inner);
@@ -821,7 +799,7 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         ident: ast::Ident,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
         let var_id = self.prepass.get_node_varid(ident.id);
         let var = self.prepass.get_var(var_id);
@@ -830,28 +808,44 @@ impl<'a> FunctionLowerer<'a> {
             let (val_id, _, _, inst) =
                 self.new_inst1(Opcode::LoadGlobalLoc, block_id, ident.span, &[], ptr_typ);
             inst.extra = InstExtraData::Global(ident.sym);
-            if let Some(sptr) = sptr {
-                let typ = self.ast_to_ir_type(var.typ);
-                self.new_memcpy(block_id, ident.span, sptr, val_id, typ);
-                return (Place::ptr(sptr, ident.span, typ), block_id);
+            match sptr {
+                SPtrOption::WriteInto(sptr) => {
+                    let typ = self.ast_to_ir_type(var.typ);
+                    self.new_memcpy(block_id, ident.span, sptr, val_id, typ);
+                    return (Place::None, block_id);
+                }
+                SPtrOption::None => {}
+                SPtrOption::ReturnPlace => {}
             }
-
             if var.is_function {
                 return (Place::ssa(val_id), block_id);
             } else {
-                let typ = self.ast_to_ir_type(var.typ);
-                return (Place::ptr(val_id, ident.span, typ), block_id);
+                let typ_id = self.ast_to_ir_type(var.typ);
+                let typ = self.typectx.get_type(typ_id);
+                if typ.is_array() || typ.is_struct() {
+                    return (Place::aptr(val_id), block_id);
+                } else {
+                    return (Place::iptr(val_id, ident.span, typ_id), block_id);
+                }
             }
         }
         let val = self.read_variable(VarId::Id(var_id), block_id);
-        if let Some(sptr) = sptr {
-            let typ = self.ast_to_ir_type(var.typ);
-            self.new_memcpy(block_id, ident.span, sptr, val, typ);
-            return (Place::ptr(sptr, ident.span, typ), block_id);
+        match sptr {
+            SPtrOption::WriteInto(sptr) => {
+                let typ = self.ast_to_ir_type(var.typ);
+                self.new_memcpy(block_id, ident.span, sptr, val, typ);
+                return (Place::aptr(sptr), block_id);
+            }
+            SPtrOption::ReturnPlace | SPtrOption::None => {}
         }
         if var.address_taken {
-            let typ = self.ast_to_ir_type(var.typ);
-            (Place::ptr(val, ident.span, typ), block_id)
+            let typ_id = self.ast_to_ir_type(var.typ);
+            let typ = self.typectx.get_type(typ_id);
+            if typ.is_array() || typ.is_struct() {
+                (Place::aptr(val), block_id)
+            } else {
+                (Place::iptr(val, ident.span, typ_id), block_id)
+            }
         } else {
             (Place::ssa_ident(val, var_id), block_id)
         }
@@ -864,24 +858,32 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         binop: ast::BinaryOp,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
         match binop.kind {
             ast::BinaryOpKind::Assign => {
                 if self.needs_sptr(binop.right) {
-                    let (lhs_place, block) = self._lower_expr(binop.left, block_id, None, false);
+                    let (lhs_place, block) =
+                        self.lower_expr(binop.left, block_id, SPtrOption::ReturnPlace);
                     let typ = self.get_expr_type(binop.left);
                     let lhs_ptr = lhs_place.get_ptr();
                     // Passing the lhs_ptr as the sptr will make the children of this node copy into it
                     // effectively performing the assignment. So we don't need to do anything else but just exit.
-                    let (_place, block) = self.lower_expr(binop.right, block, Some(lhs_ptr));
-                    if let Some(sptr) = sptr {
-                        self.new_memcpy(block, binop.span, sptr, lhs_ptr, typ);
+                    let (_place, block) =
+                        self.lower_expr(binop.right, block, SPtrOption::WriteInto(lhs_ptr));
+                    match sptr {
+                        SPtrOption::WriteInto(sptr) => {
+                            self.new_memcpy(block, binop.span, sptr, lhs_ptr, typ);
+                            return (Place::aptr(sptr), block);
+                        }
+                        SPtrOption::None | SPtrOption::ReturnPlace => {
+                            return (Place::aptr(lhs_ptr), block);
+                        }
                     }
-                    return (Place::ptr(lhs_ptr, binop.span, typ), block);
                 } else {
-                    let (lhs_place, block) = self.lower_expr(binop.left, block_id, None);
-                    let (rhs_place, block) = self.lower_expr(binop.right, block, None);
+                    let (lhs_place, block) =
+                        self.lower_expr(binop.left, block_id, SPtrOption::None);
+                    let (rhs_place, block) = self.lower_expr(binop.right, block, SPtrOption::None);
                     let rhs = rhs_place.read(self, block);
                     if let ast::ExprKind::Ident(ident) = &self.ctx.get_expr(binop.left).kind {
                         let val = self.function.values.get_mut(rhs);
@@ -906,7 +908,7 @@ impl<'a> FunctionLowerer<'a> {
                 };
                 let var_id = self.prepass.vars.intern(output_var);
 
-                let (lhs_place, next) = self.lower_expr(binop.left, block_id, None);
+                let (lhs_place, next) = self.lower_expr(binop.left, block_id, SPtrOption::None);
                 let lhs = lhs_place.read(self, next);
 
                 self.write_variable(VarId::Id(var_id), next, lhs);
@@ -914,7 +916,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.new_branch(next, binop.span, lhs, true_block, end_block);
                 self.seal_block(true_block);
 
-                let (rhs_place, next) = self.lower_expr(binop.right, true_block, None);
+                let (rhs_place, next) = self.lower_expr(binop.right, true_block, SPtrOption::None);
                 let rhs = rhs_place.read(self, next);
                 self.write_variable(VarId::Id(var_id), next, rhs);
                 self.new_jmp(next, binop.span, end_block);
@@ -938,7 +940,7 @@ impl<'a> FunctionLowerer<'a> {
                 };
                 let var_id = self.prepass.vars.intern(output_var);
 
-                let (lhs_place, next) = self.lower_expr(binop.left, block_id, None);
+                let (lhs_place, next) = self.lower_expr(binop.left, block_id, SPtrOption::None);
                 let lhs = lhs_place.read(self, next);
 
                 self.write_variable(VarId::Id(var_id), next, lhs);
@@ -946,7 +948,7 @@ impl<'a> FunctionLowerer<'a> {
                 self.new_branch(next, binop.span, lhs, end_block, false_block);
                 self.seal_block(false_block);
 
-                let (rhs_place, next) = self.lower_expr(binop.right, false_block, None);
+                let (rhs_place, next) = self.lower_expr(binop.right, false_block, SPtrOption::None);
                 let rhs = rhs_place.read(self, next);
                 self.write_variable(VarId::Id(var_id), next, rhs);
                 self.new_jmp(next, binop.span, end_block);
@@ -957,9 +959,9 @@ impl<'a> FunctionLowerer<'a> {
             }
             _ => {}
         }
-        let (lhs_place, block) = self.lower_expr(binop.left, block_id, None);
+        let (lhs_place, block) = self.lower_expr(binop.left, block_id, SPtrOption::None);
         let lhs = lhs_place.read(self, block);
-        let (rhs_place, block) = self.lower_expr(binop.right, block, None);
+        let (rhs_place, block) = self.lower_expr(binop.right, block, SPtrOption::None);
         let rhs = rhs_place.read(self, block);
         let lhs_typ_id = self.get_expr_type(binop.left);
         let rhs_typ_id = self.get_expr_type(binop.right);
@@ -1114,11 +1116,12 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         prefixop: ast::PrefixOp,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
+        expr_id: ExprId,
     ) -> (Place, BlockId) {
         match prefixop.kind {
             ast::PrefixOpKind::Increment | ast::PrefixOpKind::Decrement => {
-                let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
+                let (place, block) = self.lower_expr(prefixop.expr, block_id, SPtrOption::None);
                 let val = place.read(self, block);
                 let expr_type = self.get_expr_type(prefixop.expr);
                 let (one, _) = self.load_const(1, block, prefixop.span);
@@ -1158,34 +1161,44 @@ impl<'a> FunctionLowerer<'a> {
                 place.write(val_id, self, block);
                 (Place::ssa(val_id), block)
             }
-            ast::PrefixOpKind::UnaryPlus => self.lower_expr(prefixop.expr, block_id, None),
+            ast::PrefixOpKind::UnaryPlus => {
+                self.lower_expr(prefixop.expr, block_id, SPtrOption::None)
+            }
             ast::PrefixOpKind::UnaryMinus => {
                 let typ = self.typectx.i64_typ();
-                let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
+                let (place, block) = self.lower_expr(prefixop.expr, block_id, SPtrOption::None);
                 let val = place.read(self, block);
                 let (val_id, _, _, _) =
                     self.new_inst1(Opcode::Neg, block, prefixop.span, &[val], typ);
                 (Place::ssa(val_id), block)
             }
             ast::PrefixOpKind::AddressOf => {
-                let (place, block) = self._lower_expr(prefixop.expr, block_id, None, false);
+                let (place, block) =
+                    self.lower_expr(prefixop.expr, block_id, SPtrOption::ReturnPlace);
                 let val = place.get_ptr();
                 (Place::ssa(val), block)
             }
             ast::PrefixOpKind::Dereference => {
-                let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
+                let (place, block) = self.lower_expr(prefixop.expr, block_id, SPtrOption::None);
                 let ptr = place.read(self, block);
                 let base_typ = self.get_expr_pointee_type(prefixop.expr);
-                if let Some(sptr) = sptr {
-                    self.new_memcpy(block, prefixop.span, sptr, ptr, base_typ);
-                    (Place::ssa(sptr), block)
-                } else {
-                    (Place::ptr(ptr, prefixop.span, base_typ), block)
+                match sptr {
+                    SPtrOption::WriteInto(sptr) => {
+                        self.new_memcpy(block, prefixop.span, sptr, ptr, base_typ);
+                        (Place::aptr(sptr), block)
+                    }
+                    SPtrOption::None | SPtrOption::ReturnPlace => {
+                        if self.needs_sptr(expr_id) {
+                            (Place::aptr(ptr), block)
+                        } else {
+                            (Place::iptr(ptr, prefixop.span, base_typ), block)
+                        }
+                    }
                 }
             }
             ast::PrefixOpKind::Not => {
                 let typ = self.typectx.i64_typ();
-                let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
+                let (place, block) = self.lower_expr(prefixop.expr, block_id, SPtrOption::None);
                 let val = place.read(self, block);
                 let (val_id, _, _, _) =
                     self.new_inst1(Opcode::Not, block, prefixop.span, &[val], typ);
@@ -1193,7 +1206,7 @@ impl<'a> FunctionLowerer<'a> {
             }
             ast::PrefixOpKind::BitNot => {
                 let typ = self.typectx.i64_typ();
-                let (place, block) = self.lower_expr(prefixop.expr, block_id, None);
+                let (place, block) = self.lower_expr(prefixop.expr, block_id, SPtrOption::None);
                 let val = place.read(self, block);
                 let (val_id, _, _, _) =
                     self.new_inst1(Opcode::BitNot, block, prefixop.span, &[val], typ);
@@ -1206,7 +1219,7 @@ impl<'a> FunctionLowerer<'a> {
         postfixop: ast::PostfixOp,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        let (place, block) = self.lower_expr(postfixop.expr, block_id, None);
+        let (place, block) = self.lower_expr(postfixop.expr, block_id, SPtrOption::None);
         let original_val = place.read(self, block);
         let expr_type = self.get_expr_type(postfixop.expr);
         let (one, _) = self.load_const(1, block, postfixop.span);
@@ -1250,7 +1263,7 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         ternary: ast::Ternary,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
         let typ = self
             .type_table
@@ -1271,9 +1284,18 @@ impl<'a> FunctionLowerer<'a> {
         let false_block = self.new_block(ternary_false);
         let end_block = self.new_block(ternary_end);
 
-        let (cond_val, block) = self.lower_expr(ternary.condition, block_id, None);
+        let sptr = match sptr {
+            SPtrOption::ReturnPlace => {
+                let typ_id = self.ast_to_ir_type(typ.id);
+                let sptr = self.new_intermediate_aggregate(typ_id, block_id, ternary.span);
+                SPtrOption::WriteInto(sptr)
+            }
+            SPtrOption::WriteInto(sptr) => SPtrOption::WriteInto(sptr),
+            SPtrOption::None => SPtrOption::None,
+        };
+
+        let (cond_val, block) = self.lower_expr(ternary.condition, block_id, SPtrOption::None);
         let val_id = cond_val.read(self, block);
-        // struct handling
         self.new_branch(block, ternary.span, val_id, true_block, false_block);
         self.seal_block(true_block);
         self.seal_block(false_block);
@@ -1296,22 +1318,43 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         funccall: ast::FunctionCall,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
         expr_id: ExprId,
     ) -> (Place, BlockId) {
-        let (func, next) = self.lower_expr(funccall.func_expr, block_id, None);
+        let (func, next) = self.lower_expr(funccall.func_expr, block_id, SPtrOption::None);
         let func = func.read(self, next);
         let mut args = Vec::new();
         args.push(func);
-        if let Some(sptr) = sptr {
-            args.push(sptr);
-        }
+        let sptr = match sptr {
+            SPtrOption::ReturnPlace => {
+                assert!(self.needs_sptr(expr_id));
+                let typ = self.get_expr_type(expr_id);
+                let sptr = self.new_intermediate_aggregate(typ, block_id, funccall.span);
+                args.push(sptr);
+                SPtrOption::WriteInto(sptr)
+            }
+            SPtrOption::WriteInto(sptr) => {
+                assert!(self.needs_sptr(expr_id));
+                args.push(sptr);
+                SPtrOption::WriteInto(sptr)
+            }
+            SPtrOption::None => {
+                if self.needs_sptr(expr_id) {
+                    let typ = self.get_expr_type(expr_id);
+                    let sptr = self.new_intermediate_aggregate(typ, block_id, funccall.span);
+                    args.push(sptr);
+                    SPtrOption::WriteInto(sptr)
+                } else {
+                    SPtrOption::None
+                }
+            }
+        };
         let mut block = next;
         for arg in funccall.args {
             let typ_id = self.get_expr_type(arg);
             let typ = self.typectx.get_type(typ_id);
             let is_aggregate = typ.is_struct() || typ.is_array();
-            let (arg, next) = self.lower_expr(arg, block, None);
+            let (arg, next) = self.lower_expr(arg, block, SPtrOption::None);
             if is_aggregate {
                 let ptr = arg.get_ptr();
                 let size = self.typectx.type_size(typ_id);
@@ -1359,11 +1402,10 @@ impl<'a> FunctionLowerer<'a> {
         if no_return {
             let (_, inst) = self.new_inst0(Opcode::IndirectCall, block, funccall.span, &args);
             inst.extra = InstExtraData::ICallKind(callkind);
-            if let Some(sptr) = sptr {
-                let typ = self.get_expr_type(expr_id);
-                (Place::ptr(sptr, funccall.span, typ), block)
-            } else {
-                (Place::None, block)
+            match sptr {
+                SPtrOption::ReturnPlace => unreachable!(),
+                SPtrOption::WriteInto(sptr) => (Place::aptr(sptr), block),
+                SPtrOption::None => (Place::None, block),
             }
         } else {
             // TODO provenance for ptr return
@@ -1378,11 +1420,12 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         arrayindex: ast::ArrayIndex,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
-        let (ptr_place, block) = self._lower_expr(arrayindex.array, block_id, None, false);
+        let (ptr_place, block) =
+            self.lower_expr(arrayindex.array, block_id, SPtrOption::ReturnPlace);
         let ptr = ptr_place.get_ptr();
-        let (index_place, block) = self.lower_expr(arrayindex.index, block, None);
+        let (index_place, block) = self.lower_expr(arrayindex.index, block, SPtrOption::None);
         let index = index_place.read(self, block);
         let pointee_typ = self.get_expr_pointee_type(arrayindex.array);
         let ptr_typ = self.typectx.ptr_typ();
@@ -1397,15 +1440,14 @@ impl<'a> FunctionLowerer<'a> {
             typ: pointee_typ,
             forward: true,
         };
-        if let Some(ptr) = sptr {
-            // If sptr was given it means this array index is being copied somewhere,
-            // whether this be an imtermediate aggregate access, or an assignment to a variable, etc.
-            // It also means it's an aggregate, since it would've just been loaded from otherwise.
-            // So we just instantly copy the aggregate into the sptr and return it.
-            self.new_memcpy(block, arrayindex.span, ptr, val_id, pointee_typ);
-            (Place::ptr(ptr, arrayindex.span, pointee_typ), block)
-        } else {
-            (Place::ptr(val_id, arrayindex.span, pointee_typ), block)
+        match sptr {
+            SPtrOption::WriteInto(sptr) => {
+                self.new_memcpy(block, arrayindex.span, sptr, val_id, pointee_typ);
+                (Place::aptr(sptr), block)
+            }
+            SPtrOption::ReturnPlace | SPtrOption::None => {
+                (Place::iptr(val_id, arrayindex.span, pointee_typ), block)
+            }
         }
     }
     fn lower_size_of_type(
@@ -1423,7 +1465,7 @@ impl<'a> FunctionLowerer<'a> {
         &mut self,
         struct_init: ast::StructInit,
         block_id: BlockId,
-        sptr: ValueId,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
         let s_info = self
             .symbol_table
@@ -1439,6 +1481,12 @@ impl<'a> FunctionLowerer<'a> {
         let struct_id = self.get_structid(struct_init.name.sym);
         let s_typ = self.typectx.intern_type(Type::Struct(struct_id));
         let ptr_typ = self.typectx.ptr_typ();
+        let sptr = match sptr {
+            SPtrOption::None | SPtrOption::ReturnPlace => {
+                self.new_intermediate_aggregate(s_typ, block_id, struct_init.span)
+            }
+            SPtrOption::WriteInto(sptr) => sptr,
+        };
         let mut block = block_id;
         for (sym, expr, idx) in inits {
             if self.needs_sptr(expr) {
@@ -1450,10 +1498,10 @@ impl<'a> FunctionLowerer<'a> {
                     member_sym: sym,
                     field: idx as u32,
                 };
-                let (_place, next) = self.lower_expr(expr, block, Some(ptr));
+                let (_place, next) = self.lower_expr(expr, block, SPtrOption::WriteInto(ptr));
                 block = next;
             } else {
-                let (val, next) = self.lower_expr(expr, block, None);
+                let (val, next) = self.lower_expr(expr, block, SPtrOption::None);
                 let val = val.read(self, next);
                 let (ptr, _, _, inst) =
                     self.new_inst1(Opcode::FieldAddr, next, struct_init.span, &[sptr], ptr_typ);
@@ -1467,17 +1515,25 @@ impl<'a> FunctionLowerer<'a> {
                 block = next;
             }
         }
-        (Place::ptr(sptr, struct_init.span, s_typ), block)
+        (Place::aptr(sptr), block)
     }
     fn lower_array_init(
         &mut self,
         array_init: ast::ArrayInit,
         block_id: BlockId,
-        sptr: ValueId,
+        sptr: SPtrOption,
+        expr_id: ExprId,
     ) -> (Place, BlockId) {
         let elem_type = self.get_expr_type(array_init.elements[0]);
-        let mut block = block_id;
+        let arr_typ = self.get_expr_type(expr_id);
         let ptr_typ = self.typectx.ptr_typ();
+        let sptr = match sptr {
+            SPtrOption::None | SPtrOption::ReturnPlace => {
+                self.new_intermediate_aggregate(arr_typ, block_id, array_init.span)
+            }
+            SPtrOption::WriteInto(sptr) => sptr,
+        };
+        let mut block = block_id;
         for (index, expr) in array_init.elements.into_iter().enumerate() {
             if self.needs_sptr(expr) {
                 let (num, _) = self.load_const(index as i64, block, array_init.span);
@@ -1492,10 +1548,10 @@ impl<'a> FunctionLowerer<'a> {
                     typ: elem_type,
                     forward: true,
                 };
-                let (_place, next) = self.lower_expr(expr, block, Some(ptr));
+                let (_place, next) = self.lower_expr(expr, block, SPtrOption::WriteInto(ptr));
                 block = next;
             } else {
-                let (val, next) = self.lower_expr(expr, block, None);
+                let (val, next) = self.lower_expr(expr, block, SPtrOption::None);
                 let val = val.read(self, next);
                 let (num, _) = self.load_const(index as i64, next, array_init.span);
                 let (ptr, _, _, inst) = self.new_inst1(
@@ -1514,13 +1570,13 @@ impl<'a> FunctionLowerer<'a> {
                 block = next;
             }
         }
-        (Place::ptr(sptr, array_init.span, elem_type), block)
+        (Place::aptr(sptr), block)
     }
     fn lower_member_access(
         &mut self,
         member_access: ast::MemberAccess,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
         let struct_id = self.ctx.get_expr(member_access.struct_expr).id;
         let s_type = self.type_table[&struct_id];
@@ -1535,12 +1591,13 @@ impl<'a> FunctionLowerer<'a> {
             .get(&name)
             .expect("Should have been added");
         let index = s_info.order[&member_access.member_name.sym] as u32;
-        let field_id = s_info.fields[&member_access.member_name.sym].typ;
-        let field_typ = self.ast_to_ir_type(field_id);
+        let field_ast_id = s_info.fields[&member_access.member_name.sym].typ;
+        let field_typ_id = self.ast_to_ir_type(field_ast_id);
 
         let ptr_typ = self.typectx.ptr_typ();
 
-        let (place, block) = self._lower_expr(member_access.struct_expr, block_id, None, false);
+        let (place, block) =
+            self.lower_expr(member_access.struct_expr, block_id, SPtrOption::ReturnPlace);
         let ptr = place.get_ptr();
 
         let struct_id = self.get_structid(name);
@@ -1558,20 +1615,27 @@ impl<'a> FunctionLowerer<'a> {
             field: index,
         };
 
-        if let Some(sptr) = sptr {
-            // If sptr was given it means this struct field is an aggregate and is being copied somewhere,
-            // So we just instantly copy the aggregate into the sptr and return it.
-            self.new_memcpy(block, member_access.span, sptr, field_ptr, field_typ);
-            (Place::ssa(field_ptr), block)
-        } else {
-            (Place::ptr(field_ptr, member_access.span, field_typ), block)
+        match sptr {
+            SPtrOption::WriteInto(sptr) => {
+                self.new_memcpy(block, member_access.span, sptr, field_ptr, field_typ_id);
+                (Place::aptr(sptr), block)
+            }
+            SPtrOption::ReturnPlace | SPtrOption::None => {
+                let typ = self.typectx.get_type(field_typ_id);
+                let span = member_access.span;
+                if typ.is_struct() || typ.is_array() {
+                    (Place::aptr(field_ptr), block)
+                } else {
+                    (Place::iptr(field_ptr, span, field_typ_id), block)
+                }
+            }
         }
     }
     fn lower_pointer_member_access(
         &mut self,
         pointer_member_access: ast::PointerMemberAccess,
         block_id: BlockId,
-        sptr: Option<ValueId>,
+        sptr: SPtrOption,
     ) -> (Place, BlockId) {
         let struct_id = self.ctx.get_expr(pointer_member_access.struct_ptr_expr).id;
         let s_type = self.type_table[&struct_id];
@@ -1590,10 +1654,14 @@ impl<'a> FunctionLowerer<'a> {
             .get(&name)
             .expect("Should have been added");
         let index = s_info.order[&pointer_member_access.member_name.sym] as u32;
-        let field_id = s_info.fields[&pointer_member_access.member_name.sym].typ;
-        let field_typ = self.ast_to_ir_type(field_id);
+        let field_ast_id = s_info.fields[&pointer_member_access.member_name.sym].typ;
+        let field_typ_id = self.ast_to_ir_type(field_ast_id);
 
-        let (place, block) = self.lower_expr(pointer_member_access.struct_ptr_expr, block_id, None);
+        let (place, block) = self.lower_expr(
+            pointer_member_access.struct_ptr_expr,
+            block_id,
+            SPtrOption::None,
+        );
         let ptr = place.read(self, block);
         let ptr_typ = self.typectx.ptr_typ();
 
@@ -1611,22 +1679,28 @@ impl<'a> FunctionLowerer<'a> {
             member_sym: pointer_member_access.member_name.sym,
             struct_id,
         };
-        if let Some(sptr) = sptr {
-            // If sptr was given it means this struct field is an aggregate and is being copied somewhere,
-            // So we just instantly copy the aggregate into the sptr and return it.
-            self.new_memcpy(
-                block,
-                pointer_member_access.span,
-                sptr,
-                field_ptr,
-                field_typ,
-            );
-            (Place::ssa(field_ptr), block)
-        } else {
-            (
-                Place::ptr(field_ptr, pointer_member_access.span, field_typ),
-                block,
-            )
+        match sptr {
+            SPtrOption::WriteInto(sptr) => {
+                // If sptr was given it means this struct field is an aggregate and is being copied somewhere,
+                // So we just instantly copy the aggregate into the sptr and return it.
+                self.new_memcpy(
+                    block,
+                    pointer_member_access.span,
+                    sptr,
+                    field_ptr,
+                    field_typ_id,
+                );
+                (Place::aptr(sptr), block)
+            }
+            SPtrOption::ReturnPlace | SPtrOption::None => {
+                let span = pointer_member_access.span;
+                let typ = self.typectx.get_type(field_typ_id);
+                if typ.is_struct() || typ.is_array() {
+                    (Place::aptr(field_ptr), block)
+                } else {
+                    (Place::iptr(field_ptr, span, field_typ_id), block)
+                }
+            }
         }
     }
     fn lower_copy_prov(
@@ -1634,9 +1708,9 @@ impl<'a> FunctionLowerer<'a> {
         copy_prov: ast::CopyProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        let (ptr_place, next) = self.lower_expr(copy_prov.prov_ptr, block_id, None);
+        let (ptr_place, next) = self.lower_expr(copy_prov.prov_ptr, block_id, SPtrOption::None);
         let ptr = ptr_place.read(self, next);
-        let (addr_place, next) = self.lower_expr(copy_prov.addr, next, None);
+        let (addr_place, next) = self.lower_expr(copy_prov.addr, next, SPtrOption::None);
         let addr = addr_place.read(self, next);
         let ptr_typ = self.typectx.ptr_typ();
         let (val_id, _, _, _) = self.new_inst1(
@@ -1653,7 +1727,7 @@ impl<'a> FunctionLowerer<'a> {
         expose_prov: ast::ExposeProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        let (ptr_place, next) = self.lower_expr(expose_prov.ptr, block_id, None);
+        let (ptr_place, next) = self.lower_expr(expose_prov.ptr, block_id, SPtrOption::None);
         let ptr = ptr_place.read(self, next);
         let i64_typ = self.typectx.i64_typ();
         let (val_id, _, _, _) = self.new_inst1(
@@ -1670,7 +1744,7 @@ impl<'a> FunctionLowerer<'a> {
         unexpose_prov: ast::UnexposeProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        let (addr_place, next) = self.lower_expr(unexpose_prov.int, block_id, None);
+        let (addr_place, next) = self.lower_expr(unexpose_prov.int, block_id, SPtrOption::None);
         let addr = addr_place.read(self, next);
         let ptr_typ = self.typectx.ptr_typ();
         let (val_id, _, _, _) = self.new_inst1(
@@ -1687,7 +1761,7 @@ impl<'a> FunctionLowerer<'a> {
         new_prov: ast::NewProvenance,
         block_id: BlockId,
     ) -> (Place, BlockId) {
-        let (ptr_place, next) = self.lower_expr(new_prov.ptr, block_id, None);
+        let (ptr_place, next) = self.lower_expr(new_prov.ptr, block_id, SPtrOption::None);
         let ptr = ptr_place.read(self, next);
         let ptr_typ = self.typectx.ptr_typ();
         let (val_id, inst_id, _, _) =
@@ -1906,6 +1980,7 @@ impl<'a> FunctionLowerer<'a> {
         self.write_variable(var, block_id, val);
         val
     }
+    #[track_caller]
     fn add_phi_operands(&mut self, var: VarId, block_id: BlockId, phi_id: ValueId) -> ValueId {
         let block = self.function.blocks.get(block_id);
         let preds = block.preds.clone();
@@ -2015,6 +2090,20 @@ impl<'a> FunctionLowerer<'a> {
         let mem = self.read_variable(VarId::Mem, block);
         let (val_id, _, _, _) = self.new_inst1(Opcode::Load, block, span, &[from, mem], typ);
         val_id
+    }
+    fn new_intermediate_aggregate(
+        &mut self,
+        typ_id: TypeId,
+        block_id: BlockId,
+        span: Span,
+    ) -> ValueId {
+        let size = self.typectx.type_size(typ_id);
+        let align = self.typectx.type_align(typ_id);
+        let slot_id = self.new_stackslot(size, align, None, StackSlotKind::IntermediateAggregate);
+        let ptr_typ = self.typectx.ptr_typ();
+        let (val, _, _, inst) = self.new_inst1(Opcode::GetStackAddr, block_id, span, &[], ptr_typ);
+        inst.extra = InstExtraData::StackSlot(slot_id);
+        val
     }
 }
 
@@ -2167,5 +2256,88 @@ fn binop_kind_to_opcode(kind: ast::BinaryOpKind) -> Opcode {
         ast::BinaryOpKind::And => Opcode::And,
         ast::BinaryOpKind::Or => Opcode::Or,
         _ => unreachable!(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::time::Instant;
+
+    use crate::analysis::ast_validator::*;
+    use crate::analysis::symbol_table::SymbolTableBuilder;
+    use crate::analysis::type_checker::TypeChecker;
+    use crate::ir::interp::IrInterpreter;
+    use crate::ir::lower::Lowerer;
+    use crate::ir::lower_prepass::LoweringPrepass;
+    use crate::ir::print::IrPrinter;
+    use crate::syntax::context::Context;
+    use crate::syntax::lexer::Lexer;
+    use crate::syntax::parser::Parser;
+    #[test]
+    fn run_interp_tests() {
+        let start = Instant::now();
+        for file in std::fs::read_dir("testfiles/interp/").unwrap() {
+            let file = file.unwrap();
+            let s = std::fs::read_to_string(file.path()).unwrap();
+            run(&s, &file.file_name().into_string().unwrap());
+        }
+        let end = start.elapsed();
+
+        println!("Ran all interp tests in: {end:?}")
+    }
+
+    fn run(s: &str, name: &str) {
+        println!("Running {name}");
+        let mut ctx = Context::new();
+        let lexed = Lexer::lex(s, &mut ctx);
+        let mut has_err = false;
+        if lexed.has_errors() {
+            dbg!(lexed.errors);
+            has_err = true;
+        }
+        let parsed = Parser::parse_test(&lexed.tokens, &mut ctx);
+        if parsed.has_errors() {
+            dbg!(parsed.errors);
+            has_err = true;
+        }
+        let program = parsed.program;
+        let validation_errs = AstValidator::validate(&program, true, &ctx);
+        if !validation_errs.is_empty() {
+            dbg!(validation_errs);
+            has_err = true;
+        }
+        let symbol_res = SymbolTableBuilder::build(&program, &mut ctx);
+        if !symbol_res.errors.is_empty() {
+            dbg!(symbol_res.errors);
+            has_err = true;
+        }
+        if has_err {
+            panic!("Lexing/parsing/validation/symboltablebuilding has error");
+        }
+        let symbol_table = symbol_res.symbol_table;
+        let type_check_res = TypeChecker::check(&mut ctx, &symbol_table, &program);
+        if !type_check_res.errors.is_empty() {
+            dbg!(type_check_res.errors);
+            panic!("Type check has error");
+        }
+        let type_table = type_check_res.type_table;
+        let mut prepass = LoweringPrepass::run(&program, &ctx, &symbol_table);
+        let lowerer = Lowerer::new(&mut prepass, &symbol_table, &mut ctx, &type_table);
+        let ir_program = match lowerer.lower(&program) {
+            Ok(p) => p,
+            Err(e) => {
+                dbg!(e);
+                panic!("global eval has error");
+            }
+        };
+        let printer = IrPrinter::new(&ir_program.typectx, &ctx.symbol_interner);
+        for function in ir_program.functions.values() {
+            let res = printer.print(function).unwrap();
+            println!("{res}");
+            println!();
+        }
+
+        let mut interp = IrInterpreter::new(&ir_program, s, &ctx);
+        interp.run();
     }
 }

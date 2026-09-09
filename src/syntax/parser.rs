@@ -370,7 +370,7 @@ impl<'t> Parser<'t> {
             self.errors.push(ParsingError::ExpectedOtherToken {
                 expected: TokenKind::Semicolon,
                 found: self.current()?,
-                msg: "Expected ';' after expression statement",
+                msg: "Expected ';' after statement",
             });
             self.recover_stmt()?;
         }
@@ -395,12 +395,12 @@ impl<'t> Parser<'t> {
                     }
                 }
                 TokenKind::RCurly => {
-                    self.advance();
-                    while let Ok(tok) = self.current()
-                        && let TokenKind::Semicolon = tok.kind
-                    {
-                        self.advance();
-                    }
+                    // self.advance();
+                    // while let Ok(tok) = self.current()
+                    //     && let TokenKind::Semicolon = tok.kind
+                    // {
+                    //     self.advance();
+                    // }
                     return Ok(());
                 }
                 TokenKind::Keyword(

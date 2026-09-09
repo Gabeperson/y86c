@@ -1,0 +1,267 @@
+struct Simple {
+    x: int,
+    y: int,
+}
+fn main() {
+    let sr: Simple = Simple {x: 1257215812, y: 168265125};
+    let s: Simple = sr;    
+
+    s = ret_struct_init(1, 2);
+    assert(s.x == 1);
+    assert(s.y == 2);
+    assert(ret_struct_init(1, 2).x == 1);
+    assert(ret_struct_init(1, 2).y == 2);
+
+    s = sr;
+    s = ret_local_struct(1, 2);
+    assert(s.x == 1);
+    assert(s.y == 2);
+    assert(ret_local_struct(1, 2).x == 1);
+    assert(ret_local_struct(1, 2).y == 2);
+
+    s = sr;
+    s = ret_ternary_struct(1);
+    assert(s.x == 1);
+    assert(s.y == 2);
+    assert(ret_ternary_struct(1).x == 1);
+    assert(ret_ternary_struct(1).y == 2);
+    s = sr;
+    s = ret_ternary_struct(0);
+    assert(s.x == 2);
+    assert(s.y == 3);
+    assert(ret_ternary_struct(0).x == 2);
+    assert(ret_ternary_struct(0).y == 3);
+
+    let s2: Simple;
+    s = sr;
+    s2 = sr;
+    s2 = ret_assign_struct(&s);
+    assert(s.x == 100);
+    assert(s.y == 200);
+    assert(s2.x == 100);
+    assert(s2.y == 200);
+
+    s = sr;
+    s = ret_mutated_struct();
+    assert(s.x == 100000000);
+    assert(s.y == 1);
+
+    s = sr;
+    s = ret_struct_delayed_init();
+    assert(s.x == 5);
+    assert(s.y == 6);
+
+    let ar: [int; 5] = [9125, 1237327, 231737, 23732, 1251256];
+    let a: [int; 5] = ar;   
+    let a2: [int; 5] = ar;
+
+    a = ret_array_init();
+    assert_arr_eq(a, [1, 500, 2, 200, 155]);
+    assert_arr_eq(ret_array_init(), [1, 500, 2, 200, 155]);
+
+    a = ar;
+    a = ret_local_array();
+    assert_arr_eq(a, [1, 500, 2, 200, 155]);
+    assert_arr_eq(ret_local_array(), [1, 500, 2, 200, 155]);
+
+    a = ar;
+    a = ret_ternary_array(1);    
+    assert_arr_eq(a, [1, 2, 3, 4, 5]);
+    assert_arr_eq(ret_ternary_array(1), [1, 2, 3, 4, 5]);
+    a = ar;
+    a = ret_ternary_array(0);    
+    assert_arr_eq(a, [6, 7, 8, 9, 10]);
+    assert_arr_eq(ret_ternary_array(0), [6, 7, 8, 9, 10]);
+
+    a = ar;
+    a2 = ar;
+    a2 = ret_assign_array(&a);
+    assert_arr_eq(a, [1, 500, 2, 200, 155]);
+    assert_arr_eq(a2, [1, 500, 2, 200, 155]);
+
+    a = ar;
+    a = ret_mutated_array();
+    assert_arr_eq(a, [1, 2, 3, 4, 5]);
+    assert_arr_eq(ret_mutated_array(), [1, 2, 3, 4, 5]);
+
+    a = ar;
+    a = ret_array_delayed_init();
+    assert_arr_eq(a, [1, 2, 3, 4, 5]);
+    assert_arr_eq(ret_array_delayed_init(), [1, 2, 3, 4, 5]);
+
+    assert(param_struct_simple(Simple {x: 1, y: 2}, 1) == 1);
+    assert(param_struct_simple(Simple {x: 1, y: 2}, 0) == 2);
+
+    local_reassign_struct(Simple {x: 100, y: 50000});
+
+    s = Simple {x: 1, y: 2};
+    s2 = identity_struct(Simple {x: 1, y: 2});
+    assert(s.x == s2.x);
+    assert(s.y == s2.y);
+
+    s = Simple {x: 1, y: 2};
+    s2 = modify_struct(s);
+    assert(s.x == 1);
+    assert(s.y == 2);
+    assert(s2.x == 150000);
+    assert(s2.y == 200000);
+
+    assert(param_array([1, 2, 3, 4, 5], 0) == 1);
+    assert(param_array([1, 2, 3, 4, 5], 1) == 2);
+    assert(param_array([1, 2, 3, 4, 5], 2) == 3);
+    assert(param_array([1, 2, 3, 4, 5], 3) == 4);
+    assert(param_array([1, 2, 3, 4, 5], 4) == 5);
+
+    a = [1, 2, 3, 4, 5];
+    assert(param_array(a, 0) == 1);
+    assert(param_array(a, 1) == 2);
+    assert(param_array(a, 2) == 3);
+    assert(param_array(a, 3) == 4);
+    assert(param_array(a, 4) == 5);
+
+    local_reassign_array(a);
+
+    a = [1, 2, 3, 4, 5];
+    a2 = identity_array([1, 2, 3, 4, 5]);
+    assert_arr_eq(a, a2);
+
+    a2 = modify_array(a);
+    assert_arr_eq(a, [1, 2, 3, 4, 5]);
+    assert_arr_eq(a2, [150000, 200000, 3, 4, 5]);
+}
+
+
+fn ret_struct_init(x: int, y: int) -> Simple {
+    return Simple {
+        x: x,
+        y: y,
+    };
+}
+
+fn ret_local_struct(x: int, y: int) -> Simple {
+    let s: Simple = ret_struct_init(x, y);
+    return s;
+}
+    
+fn ret_ternary_struct(c: int) -> Simple {
+    return c ? ret_struct_init(1, 2) : ret_struct_init(2, 3);
+}
+
+fn ret_assign_struct(ptr: *Simple) -> Simple {
+    return *ptr = Simple {x: 100, y: 200};
+} 
+
+fn ret_mutated_struct() -> Simple {
+    let s: Simple = Simple {x: 2, y: 1};
+    s.x = 100000000;
+    return s;
+}
+
+fn ret_struct_delayed_init() -> Simple {
+    let s: Simple;
+    s.x = 5;
+    s.y = 6;
+    return s;
+}
+
+fn assert_arr_eq(a: [int; 5], b: [int; 5]) {
+    for (let i: int = 0; i < 5; i++) {
+        assert(a[i] == b[i]);
+    }
+}
+
+fn ret_array_init() -> [int; 5] {
+    return [1, 500, 2, 200, 155];
+}
+
+fn ret_local_array() -> [int; 5] {
+    let s: [int; 5] = ret_array_init();
+    return s;
+}
+    
+fn ret_ternary_array(c: int) -> [int; 5] {
+    return c ? [1, 2, 3, 4, 5] : [6, 7, 8, 9, 10];
+}
+
+fn ret_assign_array(ptr: *[int; 5]) -> [int; 5] {
+    return *ptr = ret_array_init();
+} 
+
+fn ret_mutated_array() -> [int; 5] {
+    let s: [int; 5] = [0, 0, 0, 0, 0];
+    s[0] = 1;
+    s[1] = 2;
+    s[2] = 3;
+    s[3] = 4;
+    s[4] = 5;
+    return s;
+}
+
+fn ret_array_delayed_init() -> [int; 5] {
+    let s: [int; 5];
+    s[0] = 1;
+    s[1] = 2;
+    s[2] = 3;
+    s[3] = 4;
+    s[4] = 5;
+    return s;
+}
+
+
+fn param_struct_simple(s: Simple, b: int) -> int {
+    return b ? s.x : s.y;
+}
+
+fn local_reassign_struct(s: Simple) {
+    let ox: int = s.x;
+    let oy: int = s.y;
+    let s2: Simple = s;
+    s.x += 10;
+    s.y += 15;
+    assert(s2.x == ox);
+    assert(s2.y == oy);
+    assert(s.x == ox+10);
+    assert(s.y == oy+15);
+}
+
+fn identity_struct(s: Simple) -> Simple {
+    return s;
+}
+
+fn modify_struct(s: Simple) -> Simple {
+    s.x = 150000;
+    s.y = 200000;
+    return s;
+}
+
+fn param_array(s: [int; 5], b: int) -> int {
+    return s[b];
+}
+
+
+fn local_reassign_array(a: [int; 5]) {
+    let orig: [int; 5] = [1, 2, 3, 4, 5];
+    let changed: [int; 5] = [6, 7, 8, 9, 10];
+    let a2: [int; 5] = a;
+    a[0] = 6;
+    a[1] = 7;
+    a[2] = 8;
+    a[3] = 9;
+    a[4] = 10;
+    for (let i: int = 0; i < 5; i++) {
+        assert(a[i] == changed[i]);
+        assert(a2[i] == orig[i]);
+    }
+}
+
+fn identity_array(s: [int; 5]) -> [int; 5] {
+    return s;
+}
+
+fn modify_array(s: [int; 5]) -> [int; 5] {
+    s[0] = 150000;
+    s[1] = 200000;
+    return s;
+}
+
+

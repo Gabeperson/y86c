@@ -1,3 +1,4 @@
+// TODO: array with struct/nested arrs
 fn main() {
     let i: int = 0;
     assert(ptr_write(&i) == &i);
